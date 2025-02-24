@@ -1,0 +1,166 @@
+using cAlgo.API;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace cAlgo
+{
+    [Indicator(IsOverlay = false, AccessRights = AccessRights.None)]
+    public class TickTrendRetrace : Indicator
+    {
+        [Parameter("Ticks for Trend", DefaultValue = 1000)]
+        public int TickPerCandle { get; set; }
+
+        [Parameter("Ticks for Retracement", DefaultValue = 250)]
+        public int RetracementUpdateInterval { get; set; }
+
+        [Parameter("Lookback Period", DefaultValue = 500)]
+        public int LookbackPeriod { get; set; }
+
+        [Output("Candlestick Trend Strength", LineColor = "Black")]
+        public IndicatorDataSeries TrendStrength { get; set; }
+
+        [Output("Retracement Strength", LineColor = "Orange")]
+        public IndicatorDataSeries RetracementStrength { get; set; }
+
+        private Queue<double> tickPrices = new Queue<double>();
+        private List<double> bullishBodies1000 = new List<double>();
+        private List<double> bullishBodies250 = new List<double>();
+        // Inizializzazione con valori realistici basati sui dati osservati
+        private double cachedAvgBody1000 = 0.02000;  // 200 pips per 1000 ticks
+        private double cachedAvgBody250 = 0.00500;   // 50 pips per 250 ticks
+        private bool isInitialized = false;
+        private int tickCounter = 0;
+        private double initialTickPrice = 0;
+        private DateTime lastStatsUpdate = DateTime.MinValue;
+        private int debugCounter = 0;
+
+        protected override void Initialize()
+        {
+            Print("Tick-Based Trend & Retracement Strength Indicator Initialized");
+            Print($"Initial average body 1000: {cachedAvgBody1000:F8}");
+            Print($"Initial average body 250: {cachedAvgBody250:F8}");
+            
+            tickPrices.Clear();
+            bullishBodies1000.Clear();
+            bullishBodies250.Clear();
+            isInitialized = true;
+        }
+
+        private void UpdateStatistics()
+        {
+            // Solo se abbiamo abbastanza dati
+            if (bullishBodies1000.Count < 10 || bullishBodies250.Count < 10)
+                return;
+
+            // Aggiorna le statistiche ogni 60 minuti
+            if (DateTime.UtcNow < lastStatsUpdate.AddMinutes(60))
+                return;
+
+            cachedAvgBody1000 = bullishBodies1000.Any()
+                ? bullishBodies1000.Average()
+                : 0.02000;  // fallback al valore iniziale
+
+            cachedAvgBody250 = bullishBodies250.Any()
+                ? bullishBodies250.Average()
+                : 0.00500;  // fallback al valore iniziale
+
+            lastStatsUpdate = DateTime.UtcNow;
+            Print($"[STATS] Updated statistics:");
+            Print($"[STATS] AvgBody1000: {cachedAvgBody1000:F8}");
+            Print($"[STATS] AvgBody250: {cachedAvgBody250:F8}");
+            Print($"[STATS] BullishBodies1000 count: {bullishBodies1000.Count}");
+            Print($"[STATS] BullishBodies250 count: {bullishBodies250.Count}");
+        }
+
+        public override void Calculate(int index)
+        {
+            if (!isInitialized) return;
+
+            double currentPrice = Bars.ClosePrices[index];
+
+            if (tickCounter == 0)
+            {
+                initialTickPrice = currentPrice;
+            }
+
+            tickPrices.Enqueue(currentPrice);
+            tickCounter++;
+
+            if (tickPrices.Count > TickPerCandle)
+                tickPrices.Dequeue();
+
+            if (tickPrices.Count < TickPerCandle)
+            {
+                TrendStrength[index] = double.NaN;
+                RetracementStrength[index] = double.NaN;
+                return;
+            }
+
+            // Process 1000-tick trend
+            if (tickCounter >= TickPerCandle)
+            {
+                double openPrice = initialTickPrice;
+                double closePrice = currentPrice;
+                double body = Math.Abs(closePrice - openPrice);
+
+                if (closePrice > openPrice)
+                {
+                    bullishBodies1000.Add(body);
+                    if (bullishBodies1000.Count > LookbackPeriod)
+                        bullishBodies1000.RemoveAt(0);
+                }
+
+                double normalizedTrend = (closePrice - openPrice) / cachedAvgBody1000;
+                
+                if (debugCounter % 100 == 0)
+                {
+                    Print($"[TREND] Raw calculation:");
+                    Print($"[TREND] Close: {closePrice:F8}, Open: {openPrice:F8}");
+                    Print($"[TREND] Difference: {(closePrice - openPrice):F8}");
+                    Print($"[TREND] Average body: {cachedAvgBody1000:F8}");
+                    Print($"[TREND] Normalized (pre-limit): {normalizedTrend:F8}");
+                }
+
+                TrendStrength[index] = Math.Max(-2, Math.Min(2, normalizedTrend));
+
+                if (tickCounter >= TickPerCandle)
+                {
+                    tickCounter = 0;
+                    initialTickPrice = currentPrice;
+                }
+            }
+
+            // Process 250-tick retracement
+            if (tickPrices.Count >= RetracementUpdateInterval)
+            {
+                double openPrice = tickPrices.ElementAt(tickPrices.Count - RetracementUpdateInterval);
+                double closePrice = tickPrices.Last();
+                double body = Math.Abs(closePrice - openPrice);
+
+                if (closePrice > openPrice)
+                {
+                    bullishBodies250.Add(body);
+                    if (bullishBodies250.Count > LookbackPeriod)
+                        bullishBodies250.RemoveAt(0);
+                }
+
+                double normalizedRetracement = (closePrice - openPrice) / cachedAvgBody250;
+
+                if (debugCounter % 100 == 0)
+                {
+                    Print($"[RETRACE] Raw calculation:");
+                    Print($"[RETRACE] Close: {closePrice:F8}, Open: {openPrice:F8}");
+                    Print($"[RETRACE] Difference: {(closePrice - openPrice):F8}");
+                    Print($"[RETRACE] Average body: {cachedAvgBody250:F8}");
+                    Print($"[RETRACE] Normalized (pre-limit): {normalizedRetracement:F8}");
+                }
+
+                RetracementStrength[index] = Math.Max(-2, Math.Min(2, normalizedRetracement));
+            }
+
+            debugCounter++;
+            UpdateStatistics();
+        }
+    }
+}
