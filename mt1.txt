@@ -1,0 +1,246 @@
+//+------------------------------------------------------------------+
+//|                                              TickTrendRetrace.mq4   |
+//|                                                              fiox   |
+//|                                                     Version 1.0.0   |
+//|                                             Date: 2025-02-25       |
+//+------------------------------------------------------------------+
+#property copyright "fiox"
+#property link      ""
+#property version   "1.0"
+#property strict
+#property indicator_separate_window
+#property indicator_buffers 2
+#property indicator_minimum -2
+#property indicator_maximum 2
+
+// Line Properties
+#property indicator_style1 STYLE_SOLID
+#property indicator_width1 2
+#property indicator_color1 clrBlack    // Trend Strength
+#property indicator_style2 STYLE_SOLID
+#property indicator_width2 2
+#property indicator_color2 clrFireBrick   // Retracement Strength
+
+// Input Parameters
+extern int TickPerCandle = 1000;           // Ticks for Trend (default 1000)
+extern int RetracementUpdateInterval = 250; // Ticks for Retracement (default 250)
+extern int LookbackPeriod = 500;           // Lookback Period (default 500)
+
+// Indicator buffers
+double TrendStrengthBuffer[];
+double RetracementBuffer[];
+
+// Tick data structure
+struct TickData {
+   double price;
+   datetime time;
+};
+
+// Global variables
+TickData tickPrices[];
+int tickCount = 0;
+int tickIndex = 0;
+double bullishBodies1000[];
+double bullishBodies250[];
+int bodies1000Count = 0;
+int bodies250Count = 0;
+double cachedAvgBody1000 = 0.02000;
+double cachedAvgBody250 = 0.00500;
+datetime lastStatsUpdate = 0;
+double lastPrice = 0;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                           |
+//+------------------------------------------------------------------+
+int init()
+{
+   // Set up indicator buffers
+   IndicatorBuffers(2);
+   SetIndexBuffer(0, TrendStrengthBuffer);
+   SetIndexBuffer(1, RetracementBuffer);
+   
+   // Set drawing properties
+   SetIndexStyle(0, DRAW_LINE, STYLE_SOLID, 2, clrBlack);
+   SetIndexStyle(1, DRAW_LINE, STYLE_SOLID, 2, clrFireBrick);
+   
+   // Set empty value (to avoid connecting gaps)
+   SetIndexEmptyValue(0, EMPTY_VALUE);
+   SetIndexEmptyValue(1, EMPTY_VALUE);
+   
+   // Set labels
+   IndicatorShortName("Tick Trend Retrace");
+   SetIndexLabel(0, "Trend Strength");
+   SetIndexLabel(1, "Retracement");
+   
+   // Initialize arrays
+   ArrayResize(tickPrices, TickPerCandle);
+   ArrayResize(bullishBodies1000, LookbackPeriod);
+   ArrayResize(bullishBodies250, LookbackPeriod);
+   
+   // Reset all counters
+   tickCount = 0;
+   bodies1000Count = 0;
+   bodies250Count = 0;
+   lastStatsUpdate = 0;
+   lastPrice = 0;
+   
+   // Clear buffers
+   ArrayInitialize(TrendStrengthBuffer, EMPTY_VALUE);
+   ArrayInitialize(RetracementBuffer, EMPTY_VALUE);
+   
+   Print("[", TimeToStr(TimeCurrent(), TIME_DATE|TIME_SECONDS), "] Tick-Based Trend & Retracement Strength Indicator Initialized");
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                         |
+//+------------------------------------------------------------------+
+int deinit()
+{
+   return(0);
+}
+
+//+------------------------------------------------------------------+
+//| Add new tick data                                                 |
+//+------------------------------------------------------------------+
+void AddTick(double price, datetime time)
+{
+   // Skip if price hasn't changed
+   if(MathAbs(price - lastPrice) < 0.000001) return;
+   
+   lastPrice = price;
+   
+   // Implement circular buffer
+   tickPrices[tickIndex].price = price;
+   tickPrices[tickIndex].time = time;
+   
+   if(tickCount < TickPerCandle) tickCount++;
+   tickIndex = (tickIndex + 1) % TickPerCandle;
+}
+
+//+------------------------------------------------------------------+
+//| Update Statistics                                                  |
+//+------------------------------------------------------------------+
+void UpdateStatistics()
+{
+   if(bodies1000Count < 10 || bodies250Count < 10) return;
+   
+   datetime currentTime = TimeCurrent();
+   if(currentTime - lastStatsUpdate < 300) return;
+   
+   double sum1000 = 0, sum250 = 0;
+   
+   for(int i = 0; i < bodies1000Count; i++)
+      sum1000 += bullishBodies1000[i];
+      
+   for(int i = 0; i < bodies250Count; i++)
+      sum250 += bullishBodies250[i];
+   
+   cachedAvgBody1000 = bodies1000Count > 0 ? sum1000 / bodies1000Count : 0.02000;
+   cachedAvgBody250 = bodies250Count > 0 ? sum250 / bodies250Count : 0.00500;
+   
+   lastStatsUpdate = currentTime;
+   
+   Print("[", TimeToStr(currentTime, TIME_DATE|TIME_SECONDS), "] Updated statistics:");
+   Print("[STATS] AvgBody1000: ", DoubleToStr(cachedAvgBody1000, 8));
+   Print("[STATS] AvgBody250: ", DoubleToStr(cachedAvgBody250, 8));
+   Print("[STATS] Stored Ticks: ", tickCount);
+   Print("[STATS] Bullish Bodies 1000 Count: ", bodies1000Count);
+   Print("[STATS] Bullish Bodies 250 Count: ", bodies250Count);
+}
+
+//+------------------------------------------------------------------+
+//| Add bullish body to history                                       |
+//+------------------------------------------------------------------+
+void AddBullishBody(double body, bool isLongPeriod)
+{
+   if(isLongPeriod)
+   {
+      if(bodies1000Count < LookbackPeriod)
+      {
+         bullishBodies1000[bodies1000Count] = body;
+         bodies1000Count++;
+      }
+      else
+      {
+         for(int i = 0; i < LookbackPeriod-1; i++)
+            bullishBodies1000[i] = bullishBodies1000[i+1];
+         bullishBodies1000[LookbackPeriod-1] = body;
+      }
+   }
+   else
+   {
+      if(bodies250Count < LookbackPeriod)
+      {
+         bullishBodies250[bodies250Count] = body;
+         bodies250Count++;
+      }
+      else
+      {
+         for(int i = 0; i < LookbackPeriod-1; i++)
+            bullishBodies250[i] = bullishBodies250[i+1];
+         bullishBodies250[LookbackPeriod-1] = body;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                                |
+//+------------------------------------------------------------------+
+int start()
+{
+   double currentPrice = MarketInfo(Symbol(), MODE_BID); // Using BID price for more accurate tick tracking
+   datetime currentTime = TimeCurrent();
+   
+   // Add new tick
+   AddTick(currentPrice, currentTime);
+   
+   // Always set current value to EMPTY_VALUE first
+   TrendStrengthBuffer[0] = EMPTY_VALUE;
+   RetracementBuffer[0] = EMPTY_VALUE;
+   
+   // Wait for enough ticks
+   if(tickCount < TickPerCandle)
+   {
+      if(tickCount % 100 == 0) // Reduce log frequency
+      {
+         Print("[", TimeToStr(currentTime, TIME_DATE|TIME_SECONDS), 
+               "] Collecting ticks: ", tickCount, "/", TickPerCandle);
+      }
+      return(0);
+   }
+   
+   // Calculate trend
+   int startIndex = (tickIndex - tickCount + TickPerCandle) % TickPerCandle;
+   double openPrice1000 = tickPrices[startIndex].price;
+   double body1000 = MathAbs(currentPrice - openPrice1000);
+   
+   if(currentPrice > openPrice1000)
+   {
+      AddBullishBody(body1000, true);
+   }
+   
+   double normalizedTrend = (currentPrice - openPrice1000) / cachedAvgBody1000;
+   TrendStrengthBuffer[0] = MathMax(-2, MathMin(2, normalizedTrend));
+   
+   // Calculate retracement
+   if(tickCount >= RetracementUpdateInterval)
+   {
+      int retraceStartIdx = (tickIndex - RetracementUpdateInterval + TickPerCandle) % TickPerCandle;
+      double openPrice250 = tickPrices[retraceStartIdx].price;
+      double body250 = MathAbs(currentPrice - openPrice250);
+      
+      if(currentPrice > openPrice250)
+      {
+         AddBullishBody(body250, false);
+      }
+      
+      double normalizedRetracement = (currentPrice - openPrice250) / cachedAvgBody250;
+      RetracementBuffer[0] = MathMax(-2, MathMin(2, normalizedRetracement));
+   }
+   
+   UpdateStatistics();
+   
+   return(0);
+}
