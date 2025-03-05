@@ -1,0 +1,155 @@
+using cAlgo.API;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace cAlgo
+{
+    [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    public class TickTrendRetraceBot : Robot
+    {
+        [Parameter("Ticks for Trend", DefaultValue = 1000)]
+        public int TickPerCandle { get; set; }
+
+        [Parameter("Ticks for Retracement", DefaultValue = 250)]
+        public int RetracementUpdateInterval { get; set; }
+
+        [Parameter("Lookback Period", DefaultValue = 500)]
+        public int LookbackPeriod { get; set; }
+
+        [Parameter("Update Interval for 1000 Tick Trend", DefaultValue = 4)]
+        public int UpdateInterval1000 { get; set; }
+
+        [Parameter("Update Interval for 250 Tick Retracement", DefaultValue = 1)]
+        public int UpdateInterval250 { get; set; }
+
+        [Parameter("Trend Strength Entry", DefaultValue = 1.5)]
+        public double TrendEntryThreshold { get; set; }
+
+        [Parameter("Trend Strength Exit", DefaultValue = 0.5)]
+        public double TrendExitThreshold { get; set; }
+
+        [Parameter("Retracement Strength Exit", DefaultValue = -1.0)]
+        public double RetraceExitThreshold { get; set; }
+
+        private Queue<TickData> tickPrices;
+        private double cachedAvgBody1000 = 0;
+        private double cachedAvgBody250 = 0;
+        private DateTime lastStatsUpdate = DateTime.MinValue;
+        private double lastPrice = 0;
+        private double currentPrice = 0;
+        private double previousPrice = 0;
+
+        private class TickData
+        {
+            public double Price { get; set; }
+            public DateTime Time { get; set; }
+        }
+
+        protected override void OnStart()
+        {
+            Print("[INFO] TickTrendRetraceBot Started");
+            tickPrices = new Queue<TickData>();
+
+            UpdateStatistics();
+        }
+
+        protected  override void OnTick()
+        {
+            currentPrice = Symbol.Bid;
+
+            // Aggiorna statistiche ogni 10 minuti
+            if (DateTime.UtcNow >= lastStatsUpdate.AddMinutes(10))
+            {
+                lastStatsUpdate = DateTime.UtcNow;
+                UpdateStatistics();
+            }
+
+            // Memorizza il prezzo precedente prima di aggiornare `currentPrice`
+            double priceChange = currentPrice - previousPrice;
+
+            // Se il prezzo non è cambiato, esce
+            if (Math.Abs(currentPrice - lastPrice) < double.Epsilon)
+            {
+                return;
+            }
+
+            lastPrice = currentPrice;
+            previousPrice = currentPrice;
+
+            // Mantieni i tick in memoria
+            tickPrices.Enqueue(new TickData { Price = currentPrice, Time = Server.Time });
+            while (tickPrices.Count > TickPerCandle)
+            {
+                tickPrices.Dequeue();
+            }
+
+            // 🔹 Dichiarazione delle variabili fuori dai blocchi condizionali
+            double priceDiff1000 = 0;
+            double normalizedTrend = 0;
+            double priceDiff250 = 0;
+            double normalizedRetracement = 0;
+
+            // 🔹 Calcolo TrendStrength solo se l'index è multiplo di UpdateInterval1000
+            if (tickPrices.Count >= TickPerCandle && tickPrices.Count % UpdateInterval1000 == 0)
+            {
+                priceDiff1000 = currentPrice - tickPrices.First().Price;
+                normalizedTrend = priceDiff1000 / cachedAvgBody1000;
+                normalizedTrend = Math.Max(-2, Math.Min(2, normalizedTrend));
+            }
+
+            // 🔹 Calcolo RetracementStrength solo se l'index è multiplo di UpdateInterval250
+            if (tickPrices.Count >= RetracementUpdateInterval && tickPrices.Count % UpdateInterval250 == 0)
+            {
+                var retraceStartPrice = tickPrices.ElementAt(tickPrices.Count - RetracementUpdateInterval).Price;
+                priceDiff250 = currentPrice - retraceStartPrice;
+                normalizedRetracement = priceDiff250 / cachedAvgBody250;
+                normalizedRetracement = Math.Max(-2, Math.Min(2, normalizedRetracement));
+            }
+
+            // 🔹 Controllo condizioni di apertura e chiusura delle posizioni
+            ManagePositions(normalizedTrend, normalizedRetracement);
+        }
+
+        private void ManagePositions(double trendStrength, double retracementStrength)
+        {
+            var openPositions = Positions.FindAll(SymbolName, TradeType.Buy);
+
+            // 🔹 Apertura di una nuova posizione BUY
+            if (trendStrength > TrendEntryThreshold && openPositions.Length == 0)
+            {
+                ExecuteMarketOrder(TradeType.Buy, SymbolName, 10000, "TrendBotBuy");
+                Print($"[TRADE] Opened BUY position - TrendStrength: {trendStrength}");
+            }
+
+            // 🔹 Chiusura delle posizioni quando le condizioni sono soddisfatte
+            foreach (var position in openPositions)
+            {
+                if (trendStrength <= TrendExitThreshold && retracementStrength <= RetraceExitThreshold)
+                {
+                    ClosePosition(position);
+                    Print($"[TRADE] Closed BUY position - TrendStrength: {trendStrength}, RetracementStrength: {retracementStrength}");
+                }
+            }
+        }
+
+        private void UpdateStatistics()
+        {
+            Print("[DEBUG] Updating statistics...");
+
+            var bars1000 = MarketData.GetBars(TimeFrame.Tick1000);
+            var bars250 = MarketData.GetBars(TimeFrame.Tick250);
+
+            var bullishBars1000 = bars1000.Where(b => b.Close > b.Open).ToList();
+            var bullishBars250 = bars250.Where(b => b.Close > b.Open).ToList();
+
+            if (bullishBars1000.Count > 0)
+                cachedAvgBody1000 = bullishBars1000.Average(b => Math.Abs(b.Close - b.Open));
+
+            if (bullishBars250.Count > 0)
+                cachedAvgBody250 = bullishBars250.Average(b => Math.Abs(b.Close - b.Open));
+
+            Print($"[STATS] Avg Body 1000: {cachedAvgBody1000:F8}, Avg Body 250: {cachedAvgBody250:F8}");
+        }
+    }
+}
