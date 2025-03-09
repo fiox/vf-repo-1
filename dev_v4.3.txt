@@ -1,0 +1,235 @@
+using cAlgo.API;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace cAlgo
+{
+    [Indicator(IsOverlay = false, AccessRights = AccessRights.None)]
+    public class TickTrendRetrace : Indicator
+    {
+        [Parameter("Ticks for Trend", DefaultValue = 1000)]
+        public int TickPerCandle { get; set; }
+
+        [Parameter("Ticks for Retracement", DefaultValue = 250)]
+        public int RetracementUpdateInterval { get; set; }
+
+        [Parameter("Lookback Period", DefaultValue = 500)]
+        public int LookbackPeriod { get; set; }
+
+        [Parameter("Update Interval for 1000 Tick Trend", DefaultValue = 4)]
+        public int UpdateInterval1000 { get; set; }
+
+        [Parameter("Update Interval for 250 Tick Retracement", DefaultValue = 1)]
+        public int UpdateInterval250 { get; set; }
+
+        [Output("Candlestick Trend Strength", LineColor = "Black", PlotType = PlotType.Line, Thickness = 2)]
+        public IndicatorDataSeries TrendStrength { get; set; }
+
+        [Output("Retracement Strength", LineColor = "Orange", PlotType = PlotType.Line, Thickness = 2)]
+        public IndicatorDataSeries RetracementStrength { get; set; }
+
+        private Queue<TickData> tickPrices;
+        private double cachedAvgBody1000 = 0;
+        private double cachedAvgBody250 = 0;
+        private DateTime lastStatsUpdate = DateTime.MinValue;
+        private double lastPrice = 0;
+        private double currentPrice = 0;
+        private double previousPrice = 0;
+        // private TextBlock tickCounter;
+        private TextBlock debugInfo;
+
+        private class TickData
+        {
+            public double Price { get; set; }
+            public DateTime Time { get; set; }
+        }
+
+protected override void Initialize()
+{
+    Print("[INFO] Initializing TickTrendRetrace Indicator");
+    tickPrices = new Queue<TickData>();
+
+    // Contatore dei tick
+    /* tickCounter = new TextBlock
+    {
+        Text = $"Ticks: 0/{TickPerCandle}",
+        ForegroundColor = Color.White,
+        BackgroundColor = Color.Blue,
+        HorizontalAlignment = HorizontalAlignment.Left,
+        VerticalAlignment = VerticalAlignment.Top,
+        Margin = 5
+    };
+    Chart.AddControl(tickCounter); */
+
+    // Debug Info
+    debugInfo = new TextBlock
+    {
+        Text = "Waiting for ticks...",
+        ForegroundColor = Color.White,
+        BackgroundColor = Color.Black,
+        HorizontalAlignment = HorizontalAlignment.Left,
+        VerticalAlignment = VerticalAlignment.Top,
+        Margin = new Thickness(5, 25, 5, 5)
+    };
+    Chart.AddControl(debugInfo);
+
+    UpdateStatistics();
+}
+
+
+        protected override void OnDestroy()
+        {
+            // if (tickCounter != null)
+                // Chart.RemoveControl(tickCounter);
+            if (debugInfo != null)
+                Chart.RemoveControl(debugInfo);
+        }
+
+public override void Calculate(int index)
+{
+    currentPrice = Symbol.Bid;  
+
+    // Aggiorna statistiche ogni 10 minuti
+    if (DateTime.UtcNow >= lastStatsUpdate.AddMinutes(10))
+    {
+        lastStatsUpdate = DateTime.UtcNow;
+        UpdateStatistics();
+    }
+
+    // 🔹 Memorizza il prezzo precedente prima di aggiornare `currentPrice`
+    double priceChange = currentPrice - previousPrice; 
+
+    // Se il prezzo non è cambiato, aggiorna solo il debug
+    if (Math.Abs(currentPrice - lastPrice) < double.Epsilon)
+    {
+        UpdateDebugInfo(index, TrendStrength[index], RetracementStrength[index], priceChange);
+        return;
+    }
+
+    lastPrice = currentPrice;  
+    previousPrice = currentPrice;  // ✅ Aggiorna il prezzo precedente SOLO dopo il calcolo
+
+    // Mantieni i tick in memoria
+    tickPrices.Enqueue(new TickData { Price = currentPrice, Time = Server.Time });
+    while (tickPrices.Count > TickPerCandle)
+    {
+        tickPrices.Dequeue();
+    }
+
+    // tickCounter.Text = $"Ticks: {tickPrices.Count}/{TickPerCandle}";
+
+    // 🔹 Dichiarazione delle variabili fuori dai blocchi condizionali
+    double priceDiff1000 = 0;
+    double normalizedTrend = 0;
+    double priceDiff250 = 0;
+    double normalizedRetracement = 0;
+
+    // 🔹 Calcolo TrendStrength solo se l'index è multiplo di UpdateInterval1000
+    if (index % UpdateInterval1000 == 0)
+    {
+        priceDiff1000 = currentPrice - tickPrices.First().Price;
+        normalizedTrend = priceDiff1000 / cachedAvgBody1000;
+        TrendStrength[index] = Math.Max(-2, Math.Min(2, normalizedTrend));
+    }
+    else
+    {
+        TrendStrength[index] = TrendStrength[index - 1];
+    }
+
+    // 🔹 Calcolo RetracementStrength solo se l'index è multiplo di UpdateInterval250
+    if (index % UpdateInterval250 == 0)
+    {
+        if (tickPrices.Count >= RetracementUpdateInterval)
+        {
+            var retraceStartPrice = tickPrices.ElementAt(tickPrices.Count - RetracementUpdateInterval).Price;
+            priceDiff250 = currentPrice - retraceStartPrice;
+            normalizedRetracement = priceDiff250 / cachedAvgBody250;
+            RetracementStrength[index] = Math.Max(-2, Math.Min(2, normalizedRetracement));
+        }
+    }
+    else
+    {
+        RetracementStrength[index] = RetracementStrength[index - 1];
+    }
+
+    UpdateDebugInfo(index, TrendStrength[index], RetracementStrength[index], priceChange);
+}
+
+
+
+private void UpdateStatistics()
+{
+    Print("[DEBUG] Updating statistics...");
+
+    var bars1000 = MarketData.GetBars(TimeFrame.Tick1000);
+    var bars250 = MarketData.GetBars(TimeFrame.Tick250);
+
+    Print($"[DEBUG] Retrieved {bars1000.Count} bars (1000 tick) and {bars250.Count} bars (250 tick)");
+
+    var bullishBars1000 = bars1000.Where(b => b.Close > b.Open).ToList();
+    var bullishBars250 = bars250.Where(b => b.Close > b.Open).ToList();
+
+    Print($"[DEBUG] Found {bullishBars1000.Count} bullish bars (1000 tick)");
+    Print($"[DEBUG] Found {bullishBars250.Count} bullish bars (250 tick)");
+
+    if (bullishBars1000.Count > 0)
+    {
+        cachedAvgBody1000 = bullishBars1000.Average(b => Math.Abs(b.Close - b.Open));
+        Print($"[DEBUG] New Avg Bullish 1000: {cachedAvgBody1000:F8}");
+    }
+    else
+    {
+        Print("[WARNING] No bullish bars found for 1000-tick timeframe!");
+    }
+
+    if (bullishBars250.Count > 0)
+    {
+        cachedAvgBody250 = bullishBars250.Average(b => Math.Abs(b.Close - b.Open));
+        Print($"[DEBUG] New Avg Bullish 250: {cachedAvgBody250:F8}");
+    }
+    else
+    {
+        Print("[WARNING] No bullish bars found for 250-tick timeframe!");
+    }
+}
+
+
+private void UpdateDebugInfo(int index, double trend, double retrace, double priceChange)
+{
+    // Calculate how many ticks are being used for the 250-tick calculation
+    int ticks250Used = Math.Min(tickPrices.Count, RetracementUpdateInterval);
+    
+    // Get historical prices
+    double price1000TicksAgo = tickPrices.Count > 0 ? tickPrices.First().Price : 0;  // First() gives oldest price in queue
+    double price250TicksAgo = tickPrices.Count >= RetracementUpdateInterval ? 
+        tickPrices.ElementAt(tickPrices.Count - RetracementUpdateInterval).Price : 0;
+    
+    debugInfo.Text = string.Format(
+        "Index: {0}\nTrend: {1:F4}\nRetrace: {2:F4}\n" +
+        "1000-Tick List: {3}/{4}\n" +    
+        "250-Tick List: {5}/{6}\n" +     
+        "Current Price: {7:F5}\n" +
+        "1000 Ticks Ago: {8:F5}\n" +     // Added price from 1000 ticks ago
+        "250 Ticks Ago: {9:F5}\n" +      // Added price from 250 ticks ago
+        "Price Change: {10:F5}\n" +
+        "Avg Bullish 1000: {11:F5}\n" +
+        "Avg Bullish 250: {12:F5}",
+        index,
+        trend,
+        retrace,
+        tickPrices.Count,
+        TickPerCandle,
+        ticks250Used,
+        RetracementUpdateInterval,
+        currentPrice,
+        price1000TicksAgo,               // Price 1000 ticks ago
+        price250TicksAgo,                // Price 250 ticks ago
+        priceChange,
+        cachedAvgBody1000,
+        cachedAvgBody250
+            );
+        }
+    }
+}
+
