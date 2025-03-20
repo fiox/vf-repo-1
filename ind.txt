@@ -1,0 +1,218 @@
+using System;
+using cAlgo.API;
+using cAlgo.API.Internals;
+using cAlgo.API.Indicators;
+using cAlgo.Indicators;
+
+namespace cAlgo.Indicators
+{
+    [Indicator(IsOverlay = true, TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    public class CandleStatistics : Indicator
+    {
+        [Parameter("Number of Candles", DefaultValue = 2000, MinValue = 1)]
+        public int CandleCount { get; set; }
+        
+        [Parameter("Font Size", DefaultValue = 10, MinValue = 8, MaxValue = 20)]
+        public int FontSize { get; set; }
+        
+        [Parameter("Position X", DefaultValue = 10, MinValue = 0)]
+        public int PositionX { get; set; }
+        
+        [Parameter("Position Y", DefaultValue = 10, MinValue = 0)]
+        public int PositionY { get; set; }
+        
+        [Parameter("Background Color", DefaultValue = "LightGray")]
+        public string BackgroundColor { get; set; }
+        
+        [Parameter("Border Color", DefaultValue = "Black")]
+        public string BorderColor { get; set; }
+        
+        // Range parameters
+        [Parameter("Range 1 (pips)", DefaultValue = 5, MinValue = 0)]
+        public double Range1 { get; set; }
+        
+        [Parameter("Range 2 (pips)", DefaultValue = 10, MinValue = 0)]
+        public double Range2 { get; set; }
+        
+        [Parameter("Range 3 (pips)", DefaultValue = 15, MinValue = 0)]
+        public double Range3 { get; set; }
+        
+        [Parameter("Range 4 (pips)", DefaultValue = 20, MinValue = 0)]
+        public double Range4 { get; set; }
+        
+        [Parameter("Range 5 (pips)", DefaultValue = 25, MinValue = 0)]
+        public double Range5 { get; set; }
+        
+        // Time filter parameters
+        [Parameter("Use Time Filter", DefaultValue = false)]
+        public bool UseTimeFilter { get; set; }
+        
+        [Parameter("Start Time (HH:MM)", DefaultValue = "09:00")]
+        public string StartTimeStr { get; set; }
+        
+        [Parameter("End Time (HH:MM)", DefaultValue = "17:00")]
+        public string EndTimeStr { get; set; }
+        
+        private Color _backgroundColor;
+        private Color _borderColor;
+        private TimeSpan _startTime;
+        private TimeSpan _endTime;
+
+        protected override void Initialize()
+        {
+            _backgroundColor = Color.FromName(BackgroundColor);
+            _borderColor = Color.FromName(BorderColor);
+            
+            // Parse time strings
+            if (!TimeSpan.TryParse(StartTimeStr, out _startTime))
+                _startTime = new TimeSpan(9, 0, 0); // Default to 09:00
+                
+            if (!TimeSpan.TryParse(EndTimeStr, out _endTime))
+                _endTime = new TimeSpan(17, 0, 0); // Default to 17:00
+        }
+
+        private int GetRangeIndex(double value)
+        {
+            if (value <= Range1) return 0;
+            if (value <= Range2) return 1;
+            if (value <= Range3) return 2;
+            if (value <= Range4) return 3;
+            if (value <= Range5) return 4;
+            return 5;
+        }
+
+        private string GetRangeDescription(int index)
+        {
+            switch (index)
+            {
+                case 0: return $"0-{Range1}";
+                case 1: return $"{Range1}-{Range2}";
+                case 2: return $"{Range2}-{Range3}";
+                case 3: return $"{Range3}-{Range4}";
+                case 4: return $"{Range4}-{Range5}";
+                default: return $">{Range5}";
+            }
+        }
+        
+        private bool IsInTimeRange(DateTime time)
+        {
+            if (!UseTimeFilter)
+                return true;
+                
+            TimeSpan timeOfDay = time.TimeOfDay;
+            
+            // Handle cases where end time is before start time (overnight)
+            if (_startTime <= _endTime)
+                return timeOfDay >= _startTime && timeOfDay <= _endTime;
+            else
+                return timeOfDay >= _startTime || timeOfDay <= _endTime;
+        }
+
+        public override void Calculate(int index)
+        {
+            if (index < CandleCount) return;
+
+            int bullishCount = 0, bearishCount = 0;
+            int totalProcessedCandles = 0;
+            
+            // Arrays to store count of candles in each range
+            int[] bullishLowToOpenRanges = new int[6];
+            int[] bullishHighToOpenRanges = new int[6];
+            int[] bearishHighToOpenRanges = new int[6];
+            int[] bearishLowToOpenRanges = new int[6];
+            
+            double bullishLowToOpenSum = 0, bullishHighToOpenSum = 0;
+            double bearishHighToOpenSum = 0, bearishLowToOpenSum = 0;
+
+            for (int i = 0; i < CandleCount; i++)
+            {
+                var bar = Bars[index - i];
+                
+                // Check if the bar is within the specified time range
+                if (!IsInTimeRange(bar.OpenTime))
+                    continue;
+                    
+                totalProcessedCandles++;
+
+                if (bar.Close > bar.Open) // Bullish
+                {
+                    bullishCount++;
+                    
+                    double lowToOpen = (bar.Open - bar.Low) / Symbol.PipSize;
+                    double highToOpen = (bar.High - bar.Open) / Symbol.PipSize;
+                    
+                    bullishLowToOpenSum += lowToOpen;
+                    bullishHighToOpenSum += highToOpen;
+                    
+                    // Categorize into ranges
+                    bullishLowToOpenRanges[GetRangeIndex(lowToOpen)]++;
+                    bullishHighToOpenRanges[GetRangeIndex(highToOpen)]++;
+                }
+                else if (bar.Close < bar.Open) // Bearish
+                {
+                    bearishCount++;
+                    
+                    double highToOpen = (bar.High - bar.Open) / Symbol.PipSize;
+                    double lowToOpen = (bar.Open - bar.Low) / Symbol.PipSize;
+                    
+                    bearishHighToOpenSum += highToOpen;
+                    bearishLowToOpenSum += lowToOpen;
+                    
+                    // Categorize into ranges
+                    bearishHighToOpenRanges[GetRangeIndex(highToOpen)]++;
+                    bearishLowToOpenRanges[GetRangeIndex(lowToOpen)]++;
+                }
+            }
+
+            double avgBullishLowToOpen = bullishCount > 0 ? bullishLowToOpenSum / bullishCount : 0;
+            double avgBullishHighToOpen = bullishCount > 0 ? bullishHighToOpenSum / bullishCount : 0;
+            double avgBearishHighToOpen = bearishCount > 0 ? bearishHighToOpenSum / bearishCount : 0;
+            double avgBearishLowToOpen = bearishCount > 0 ? bearishLowToOpenSum / bearishCount : 0;
+
+            string timeFilterInfo = UseTimeFilter ? $"Time Filter: {StartTimeStr} - {EndTimeStr}" : "Time Filter: Off";
+            
+            string text = $"Candle Statistics ({totalProcessedCandles} of {CandleCount} Candles)\n" +
+                          $"Timeframe: {Chart.TimeFrame}\n" +
+                          $"{timeFilterInfo}\n\n" +
+                          $"BULLISH ({bullishCount}):\n" +
+                          $"- Low to Open: {avgBullishLowToOpen:F2} pips\n" +
+                          $"- High to Open: {avgBullishHighToOpen:F2} pips\n\n" +
+                          $"BEARISH ({bearishCount}):\n" +
+                          $"- High to Open: {avgBearishHighToOpen:F2} pips\n" +
+                          $"- Low to Open: {avgBearishLowToOpen:F2} pips\n\n";
+                          
+            // Add range distribution information
+            text += "RANGE DISTRIBUTION (%):\n\n";
+            
+            text += "Bullish Low to Open:\n";
+            for (int i = 0; i < 6; i++)
+            {
+                double percentage = bullishCount > 0 ? (double)bullishLowToOpenRanges[i] / bullishCount * 100 : 0;
+                text += $"- {GetRangeDescription(i)} pips: {percentage:F1}%\n";
+            }
+            
+            text += "\nBullish High to Open:\n";
+            for (int i = 0; i < 6; i++)
+            {
+                double percentage = bullishCount > 0 ? (double)bullishHighToOpenRanges[i] / bullishCount * 100 : 0;
+                text += $"- {GetRangeDescription(i)} pips: {percentage:F1}%\n";
+            }
+            
+            text += "\nBearish High to Open:\n";
+            for (int i = 0; i < 6; i++)
+            {
+                double percentage = bearishCount > 0 ? (double)bearishHighToOpenRanges[i] / bearishCount * 100 : 0;
+                text += $"- {GetRangeDescription(i)} pips: {percentage:F1}%\n";
+            }
+            
+            text += "\nBearish Low to Open:\n";
+            for (int i = 0; i < 6; i++)
+            {
+                double percentage = bearishCount > 0 ? (double)bearishLowToOpenRanges[i] / bearishCount * 100 : 0;
+                text += $"- {GetRangeDescription(i)} pips: {percentage:F1}%\n";
+            }
+
+            Chart.DrawStaticText("CandleStats", text, VerticalAlignment.Top, HorizontalAlignment.Left, Color.Black);
+        }
+    }
+}
