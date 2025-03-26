@@ -1,0 +1,138 @@
+using System;
+using cAlgo.API;
+using cAlgo.API.Indicators;
+
+namespace cAlgo.Indicators
+{
+    [Indicator(IsOverlay = true, TimeZone = TimeZones.UTC)]
+    public class CandleAnalysisIndicator : Indicator
+    {
+        private TimeSpan targetTime = new TimeSpan(12, 30, 0); // 12:30 time
+
+        [Parameter("Symbol", DefaultValue = "")]
+        public string SymbolParameter { get; set; }
+
+        [Parameter("Max Calculation End Time", DefaultValue = "23:59")]
+        public string MaxCalculationEndTimeParam { get; set; }
+
+        [Parameter("Max Low Break Pips", DefaultValue = 0, Step = 0.1)]
+        public double MaxLowBreakPips { get; set; }
+
+        [Parameter("Max High Break Pips", DefaultValue = 0, Step = 0.1)]
+        public double MaxHighBreakPips { get; set; }
+
+        private TimeSpan maxCalculationEndTime;
+
+        protected override void Initialize()
+        {
+            // If no specific symbol is set, use the chart's symbol
+            if (string.IsNullOrEmpty(SymbolParameter))
+                SymbolParameter = Symbol.Name;
+
+            // Parse the end time parameter
+            if (!TimeSpan.TryParse(MaxCalculationEndTimeParam, out maxCalculationEndTime))
+            {
+                // Default to end of day if parsing fails
+                maxCalculationEndTime = new TimeSpan(23, 59, 59);
+                Print($"Invalid end time. Defaulting to 23:59.");
+            }
+        }
+
+        public override void Calculate(int index)
+        {
+            // Ensure we have enough bars
+            if (Bars.Count < 2)
+                return;
+
+            // Find the 12:30 candle on the 5-minute chart
+            int targetCandleIndex = FindTargetCandleIndex(index);
+
+            if (targetCandleIndex != -1)
+            {
+                Bar targetCandle = Bars[targetCandleIndex];
+
+                // Calculate max pips after breaking low
+                double maxLowBreakPips = CalculateMaxLowBreakPips(targetCandle, index);
+                MaxLowBreakPips = maxLowBreakPips;
+
+                // Calculate max pips after breaking high
+                double maxHighBreakPips = CalculateMaxHighBreakPips(targetCandle, index);
+                MaxHighBreakPips = maxHighBreakPips;
+
+                // Optional: Print results to output
+                Print($"Target Candle at 12:30 - Open: {targetCandle.Open}, High: {targetCandle.High}, Low: {targetCandle.Low}, Close: {targetCandle.Close}");
+                Print($"Max Pips after Low Break: {maxLowBreakPips}");
+                Print($"Max Pips after High Break: {maxHighBreakPips}");
+                Print($"Max Calculation End Time: {maxCalculationEndTime}");
+            }
+            else
+            {
+                Print("No candle found at 12:30");
+                MaxLowBreakPips = 0;
+                MaxHighBreakPips = 0;
+            }
+        }
+
+        private int FindTargetCandleIndex(int currentIndex)
+        {
+            for (int i = currentIndex; i >= 0; i--)
+            {
+                // Check if the candle's time matches 12:30
+                if (Bars[i].OpenTime.TimeOfDay.Hours == targetTime.Hours && 
+                    Bars[i].OpenTime.TimeOfDay.Minutes == targetTime.Minutes)
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        private double CalculateMaxLowBreakPips(Bar targetCandle, int currentIndex)
+        {
+            double maxDownMovement = 0;
+            double pipSize = Symbol.PipSize;
+
+            for (int i = currentIndex; i >= 0; i--)
+            {
+                // Only consider candles after the target candle
+                if (Bars[i].OpenTime <= targetCandle.OpenTime)
+                    break;
+
+                // Check if the current bar's time is within the specified end time
+                TimeSpan currentBarTime = Bars[i].OpenTime.TimeOfDay;
+                if (currentBarTime > maxCalculationEndTime)
+                    continue;
+
+                // Calculate maximum downward movement from high
+                double currentDownMovement = Math.Abs(targetCandle.High - Bars[i].Low) / pipSize;
+                maxDownMovement = Math.Max(maxDownMovement, currentDownMovement);
+            }
+
+            return maxDownMovement;
+        }
+
+        private double CalculateMaxHighBreakPips(Bar targetCandle, int currentIndex)
+        {
+            double maxUpMovement = 0;
+            double pipSize = Symbol.PipSize;
+
+            for (int i = currentIndex; i >= 0; i--)
+            {
+                // Only consider candles after the target candle
+                if (Bars[i].OpenTime <= targetCandle.OpenTime)
+                    break;
+
+                // Check if the current bar's time is within the specified end time
+                TimeSpan currentBarTime = Bars[i].OpenTime.TimeOfDay;
+                if (currentBarTime > maxCalculationEndTime)
+                    continue;
+
+                // Calculate maximum upward movement from low
+                double currentUpMovement = Math.Abs(Bars[i].High - targetCandle.Low) / pipSize;
+                maxUpMovement = Math.Max(maxUpMovement, currentUpMovement);
+            }
+
+            return maxUpMovement;
+        }
+    }
+}
