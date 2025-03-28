@@ -1,0 +1,609 @@
+//+------------------------------------------------------------------+
+//|                                          TimeframeCorrelation.mq4  |
+//|                                     Copyright 2025, fiox           |
+//|                               Last Update: 2025-03-27 18:37:13 UTC |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, fiox"
+#property link      ""
+#property version   "1.00"
+#property strict
+#property indicator_chart_window
+
+// Input parameters
+extern int CandlesToAnalyze = 2000;         // Number of candles to analyze
+extern int TextSize = 9;                     // Size of the displayed text
+extern double TextSpacing = 0.15;            // Spacing between text lines
+extern color TextColor = clrWhite;           // Text color
+extern ENUM_BASE_CORNER TextCorner = CORNER_LEFT_UPPER;  // Corner for text placement
+extern int TextX = 10;                      // X coordinate from corner
+extern int TextY = 10;                      // Y coordinate from corner
+extern int SecondColumnX = 300;
+
+// Single timeframe stats
+double bullLowerTFBullCurrentTFPercent = 0;
+double bearLowerTFBullCurrentTFPercent = 0;
+double bullLowerTFBearCurrentTFPercent = 0;
+double bearLowerTFBearCurrentTFPercent = 0;
+int bullLowerTFCount = 0;
+int bearLowerTFCount = 0;
+int bullLowerTFBullCurrentTFCount = 0;
+int bearLowerTFBullCurrentTFCount = 0;
+int bullLowerTFBearCurrentTFCount = 0;
+int bearLowerTFBearCurrentTFCount = 0;
+
+// Two timeframe analysis
+struct PatternStats {
+    int count;
+    int bullishCount;
+    int bearishCount;
+    double bullishPercent;
+    double bearishPercent;
+};
+
+PatternStats patterns[4];
+
+// Extended pattern analysis
+struct ExtendedPatternStats {
+    int count;
+    int bullishCount;
+    int bearishCount;
+    double bullishPercent;
+    double bearishPercent;
+};
+
+ExtendedPatternStats extendedPatterns[16];  // 2^4 possible combinations
+
+// Double candle analysis
+struct DoubleCandle {
+    int count;
+    int bullishCount;
+    int bearishCount;
+    double bullishPercent;
+    double bearishPercent;
+};
+
+DoubleCandle doubleCandlePatterns[4];  // 2^2 possible combinations for two candles
+
+//+------------------------------------------------------------------+
+int GetLowerTimeframe(int currentTimeframe)
+{
+    switch(currentTimeframe)
+    {
+        case PERIOD_M1:  return 0;
+        case PERIOD_M5:  return PERIOD_M1;
+        case PERIOD_M15: return PERIOD_M5;
+        case PERIOD_M30: return PERIOD_M15;
+        case PERIOD_H1:  return PERIOD_M30;
+        case PERIOD_H4:  return PERIOD_H1;
+        case PERIOD_D1:  return PERIOD_H4;
+        case PERIOD_W1:  return PERIOD_D1;
+        case PERIOD_MN1: return PERIOD_W1;
+        default: return 0;
+    }
+}
+
+//+------------------------------------------------------------------+
+string GetTimeframeName(int timeframe)
+{
+    switch(timeframe)
+    {
+        case PERIOD_M1:  return "M1";
+        case PERIOD_M5:  return "M5";
+        case PERIOD_M15: return "M15";
+        case PERIOD_M30: return "M30";
+        case PERIOD_H1:  return "H1";
+        case PERIOD_H4:  return "H4";
+        case PERIOD_D1:  return "D1";
+        case PERIOD_W1:  return "W1";
+        case PERIOD_MN1: return "MN";
+        default: return "Unknown";
+    }
+}
+
+//+------------------------------------------------------------------+
+int GetYOffset(int index)
+{
+    switch(TextCorner)
+    {
+        case CORNER_LEFT_UPPER:
+        case CORNER_RIGHT_UPPER:
+            return TextY + (index * TextSize * 2);  // Spacing from top
+        case CORNER_LEFT_LOWER:
+        case CORNER_RIGHT_LOWER:
+            return TextY - (index * TextSize * 2);  // Spacing from bottom
+        default:
+            return TextY + (index * TextSize * 2);
+    }
+}
+
+//+------------------------------------------------------------------+
+int init()
+{
+    DeleteObjects();
+    return(0);
+}
+
+//+------------------------------------------------------------------+
+int deinit()
+{
+    DeleteObjects();
+    return(0);
+}
+
+//+------------------------------------------------------------------+
+void DeleteObjects()
+{
+    ObjectsDeleteAll(0, "TF_Correlation_");  // Delete all objects starting with this prefix
+    ObjectsDeleteAll(0, "Extended_");        // Delete all objects starting with this prefix
+}
+
+//+------------------------------------------------------------------+
+void ResetPatternStats()
+{
+    for(int i = 0; i < 4; i++)
+    {
+        patterns[i].count = 0;
+        patterns[i].bullishCount = 0;
+        patterns[i].bearishCount = 0;
+        patterns[i].bullishPercent = 0;
+        patterns[i].bearishPercent = 0;
+    }
+}
+
+//+------------------------------------------------------------------+
+void ResetExtendedPatternStats()
+{
+    for(int i = 0; i < 16; i++)
+    {
+        extendedPatterns[i].count = 0;
+        extendedPatterns[i].bullishCount = 0;
+        extendedPatterns[i].bearishCount = 0;
+        extendedPatterns[i].bullishPercent = 0;
+        extendedPatterns[i].bearishPercent = 0;
+    }
+}
+
+//+------------------------------------------------------------------+
+void ResetDoubleCandleStats()
+{
+    for(int i = 0; i < 4; i++)
+    {
+        doubleCandlePatterns[i].count = 0;
+        doubleCandlePatterns[i].bullishCount = 0;
+        doubleCandlePatterns[i].bearishCount = 0;
+        doubleCandlePatterns[i].bullishPercent = 0;
+        doubleCandlePatterns[i].bearishPercent = 0;
+    }
+}
+
+//+------------------------------------------------------------------+
+string GetPatternDescription(int patternIndex, string lowestTFName, string middleTFName)
+{
+    string lowestFirst = ((patternIndex & 8) != 0) ? "Bull" : "Bear";
+    string lowestSecond = ((patternIndex & 4) != 0) ? "Bull" : "Bear";
+    string middleFirst = ((patternIndex & 2) != 0) ? "Bull" : "Bear";
+    string middleSecond = ((patternIndex & 1) != 0) ? "Bull" : "Bear";
+    
+    return lowestTFName + "(" + lowestFirst + "," + lowestSecond + ") " + 
+           middleTFName + "(" + middleFirst + "," + middleSecond + ")";
+}
+
+//+------------------------------------------------------------------+
+string GetDoubleCandlePattern(int patternIndex)
+{
+    string firstCandle = ((patternIndex & 2) != 0) ? "Bull" : "Bear";
+    string secondCandle = ((patternIndex & 1) != 0) ? "Bull" : "Bear";
+    return firstCandle + "," + secondCandle;
+}
+
+//+------------------------------------------------------------------+
+int start()
+{
+    int currentTF = Period();
+    int middleTF = GetLowerTimeframe(currentTF);
+    int lowestTF = GetLowerTimeframe(middleTF);
+    
+    DeleteObjects(); // Clear previous displays
+    
+    // If middle timeframe exists, show single timeframe correlations
+    if(middleTF != 0)
+    {
+        AnalyzeSingleTimeframe(currentTF, middleTF);
+        AnalyzeDoubleCandles(currentTF, middleTF);
+        
+        if(lowestTF != 0)
+        {
+            AnalyzeTwoTimeframes(currentTF, middleTF, lowestTF);
+            AnalyzeExtendedTimeframes(currentTF, middleTF, lowestTF);
+        }
+        
+        UpdateSingleTimeframeDisplay(currentTF, middleTF);
+    }
+    
+    return(0);
+}
+
+//+------------------------------------------------------------------+
+void AnalyzeSingleTimeframe(int currentTF, int lowerTF)
+{
+    bullLowerTFCount = 0;
+    bearLowerTFCount = 0;
+    bullLowerTFBullCurrentTFCount = 0;
+    bearLowerTFBullCurrentTFCount = 0;
+    bullLowerTFBearCurrentTFCount = 0;
+    bearLowerTFBearCurrentTFCount = 0;
+    
+    int totalCandles = MathMin(CandlesToAnalyze, Bars);
+    
+    for(int i = 0; i < totalCandles; i++)
+    {
+        datetime currentTime = iTime(NULL, currentTF, i);
+        bool isCurrentTFBull = iClose(NULL, currentTF, i) > iOpen(NULL, currentTF, i);
+        
+        int lowerTFIndex = iBarShift(NULL, lowerTF, currentTime, false);
+        
+        if(lowerTFIndex < 0) continue;
+        
+        bool isLowerTFBull = iClose(NULL, lowerTF, lowerTFIndex) > iOpen(NULL, lowerTF, lowerTFIndex);
+        
+        if(isLowerTFBull)
+        {
+            bullLowerTFCount++;
+            if(isCurrentTFBull)
+                bullLowerTFBullCurrentTFCount++;
+            else
+                bullLowerTFBearCurrentTFCount++;
+        }
+        else
+        {
+            bearLowerTFCount++;
+            if(isCurrentTFBull)
+                bearLowerTFBullCurrentTFCount++;
+            else
+                bearLowerTFBearCurrentTFCount++;
+        }
+    }
+    
+    if(bullLowerTFCount > 0)
+    {
+        bullLowerTFBullCurrentTFPercent = (double)bullLowerTFBullCurrentTFCount / bullLowerTFCount * 100;
+        bullLowerTFBearCurrentTFPercent = (double)bullLowerTFBearCurrentTFCount / bullLowerTFCount * 100;
+    }
+    
+    if(bearLowerTFCount > 0)
+    {
+        bearLowerTFBullCurrentTFPercent = (double)bearLowerTFBullCurrentTFCount / bearLowerTFCount * 100;
+        bearLowerTFBearCurrentTFPercent = (double)bearLowerTFBearCurrentTFCount / bearLowerTFCount * 100;
+    }
+}
+
+//+------------------------------------------------------------------+
+void AnalyzeDoubleCandles(int currentTF, int lowerTF)
+{
+    ResetDoubleCandleStats();
+    
+    int totalCandles = MathMin(CandlesToAnalyze, Bars);
+    
+    for(int i = 0; i < totalCandles; i++)
+    {
+        datetime currentTime = iTime(NULL, currentTF, i);
+        bool isCurrentTFBull = iClose(NULL, currentTF, i) > iOpen(NULL, currentTF, i);
+        
+        // Get first candle of lower timeframe
+        int firstCandleIndex = iBarShift(NULL, lowerTF, currentTime, false);
+        if(firstCandleIndex < 0) continue;
+        
+        // Get second candle of lower timeframe
+        int secondCandleIndex = firstCandleIndex - 1;
+        if(secondCandleIndex < 0) continue;
+        
+        bool isFirstCandleBull = iClose(NULL, lowerTF, firstCandleIndex) > iOpen(NULL, lowerTF, firstCandleIndex);
+        bool isSecondCandleBull = iClose(NULL, lowerTF, secondCandleIndex) > iOpen(NULL, lowerTF, secondCandleIndex);
+        
+        // Calculate pattern index (2 bits, each representing a candle's direction)
+        int patternIndex = (isFirstCandleBull ? 2 : 0) + (isSecondCandleBull ? 1 : 0);
+        
+        doubleCandlePatterns[patternIndex].count++;
+        if(isCurrentTFBull)
+            doubleCandlePatterns[patternIndex].bullishCount++;
+        else
+            doubleCandlePatterns[patternIndex].bearishCount++;
+    }
+    
+    for(int i = 0; i < 4; i++)
+    {
+        if(doubleCandlePatterns[i].count > 0)
+        {
+            doubleCandlePatterns[i].bullishPercent = (double)doubleCandlePatterns[i].bullishCount / doubleCandlePatterns[i].count * 100;
+            doubleCandlePatterns[i].bearishPercent = (double)doubleCandlePatterns[i].bearishCount / doubleCandlePatterns[i].count * 100;
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+void AnalyzeTwoTimeframes(int currentTF, int middleTF, int lowestTF)
+{
+    ResetPatternStats();
+    
+    int totalCandles = MathMin(CandlesToAnalyze, Bars);
+    
+    for(int i = 0; i < totalCandles; i++)
+    {
+        datetime currentTime = iTime(NULL, currentTF, i);
+        bool isCurrentTFBull = iClose(NULL, currentTF, i) > iOpen(NULL, currentTF, i);
+        
+        int middleTFIndex = iBarShift(NULL, middleTF, currentTime, false);
+        int lowestTFIndex = iBarShift(NULL, lowestTF, currentTime, false);
+        
+        if(middleTFIndex < 0 || lowestTFIndex < 0) continue;
+        
+        bool isMiddleTFBull = iClose(NULL, middleTF, middleTFIndex) > iOpen(NULL, middleTF, middleTFIndex);
+        bool isLowestTFBull = iClose(NULL, lowestTF, lowestTFIndex) > iOpen(NULL, lowestTF, lowestTFIndex);
+        
+        int patternIndex = (isLowestTFBull ? 2 : 0) + (isMiddleTFBull ? 1 : 0);
+        
+        patterns[patternIndex].count++;
+        if(isCurrentTFBull)
+            patterns[patternIndex].bullishCount++;
+        else
+            patterns[patternIndex].bearishCount++;
+    }
+    
+    for(int i = 0; i < 4; i++)
+    {
+        if(patterns[i].count > 0)
+        {
+            patterns[i].bullishPercent = (double)patterns[i].bullishCount / patterns[i].count * 100;
+            patterns[i].bearishPercent = (double)patterns[i].bearishCount / patterns[i].count * 100;
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+void AnalyzeExtendedTimeframes(int currentTF, int middleTF, int lowestTF)
+{
+    ResetExtendedPatternStats();
+    
+    int totalCandles = MathMin(CandlesToAnalyze, Bars);
+    
+    for(int i = 0; i < totalCandles; i++)
+    {
+        datetime currentTime = iTime(NULL, currentTF, i);
+        bool isCurrentTFBull = iClose(NULL, currentTF, i) > iOpen(NULL, currentTF, i);
+        
+        // Get indices for middle timeframe
+        int middleTFFirstIndex = iBarShift(NULL, middleTF, currentTime, false);
+        if(middleTFFirstIndex < 0) continue;
+        
+        int middleTFSecondIndex = middleTFFirstIndex - 1;
+        if(middleTFSecondIndex < 0) continue;
+        
+        // Get indices for lowest timeframe
+        int lowestTFFirstIndex = iBarShift(NULL, lowestTF, currentTime, false);
+        if(lowestTFFirstIndex < 0) continue;
+        
+        int lowestTFSecondIndex = lowestTFFirstIndex - 1;
+        if(lowestTFSecondIndex < 0) continue;
+        
+        bool isLowestFirstBull = iClose(NULL, lowestTF, lowestTFFirstIndex) > iOpen(NULL, lowestTF, lowestTFFirstIndex);
+        bool isLowestSecondBull = iClose(NULL, lowestTF, lowestTFSecondIndex) > iOpen(NULL, lowestTF, lowestTFSecondIndex);
+        bool isMiddleFirstBull = iClose(NULL, middleTF, middleTFFirstIndex) > iOpen(NULL, middleTF, middleTFFirstIndex);
+        bool isMiddleSecondBull = iClose(NULL, middleTF, middleTFSecondIndex) > iOpen(NULL, middleTF, middleTFSecondIndex);
+        
+        int patternIndex = (isLowestFirstBull ? 8 : 0) + 
+                          (isLowestSecondBull ? 4 : 0) + 
+                          (isMiddleFirstBull ? 2 : 0) + 
+                          (isMiddleSecondBull ? 1 : 0);
+        
+        extendedPatterns[patternIndex].count++;
+        if(isCurrentTFBull)
+            extendedPatterns[patternIndex].bullishCount++;
+        else
+            extendedPatterns[patternIndex].bearishCount++;
+    }
+    
+    // Calculate percentages
+    for(int i = 0; i < 16; i++)
+    {
+        if(extendedPatterns[i].count > 0)
+        {
+            extendedPatterns[i].bullishPercent = (double)extendedPatterns[i].bullishCount / extendedPatterns[i].count * 100;
+            extendedPatterns[i].bearishPercent = (double)extendedPatterns[i].bearishCount / extendedPatterns[i].count * 100;
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+void UpdateSingleTimeframeDisplay(int currentTF, int middleTF)
+{
+    string currentTFName = GetTimeframeName(currentTF);
+    string middleTFName = GetTimeframeName(middleTF);
+    
+    int index = 1;
+    
+    // Original single candle correlation header
+    CreateOrUpdateLabel("TF_Correlation_" + IntegerToString(index), 
+        middleTFName + "-" + currentTFName + " Single Candle Corr. (" + 
+        IntegerToString(CandlesToAnalyze) + " candles)", index++, false, true);
+    
+    // Original single candle stats with occurrence counts
+    CreateOrUpdateLabel("TF_Correlation_" + IntegerToString(index), 
+        middleTFName + " Bull -> " + currentTFName + " Bull: " + 
+        DoubleToString(bullLowerTFBullCurrentTFPercent, 2) + "% [" + 
+        IntegerToString(bullLowerTFBullCurrentTFCount) + " occurr.]", index++);
+        
+    CreateOrUpdateLabel("TF_Correlation_" + IntegerToString(index), 
+        middleTFName + " Bull -> " + currentTFName + " Bear: " + 
+        DoubleToString(bullLowerTFBearCurrentTFPercent, 2) + "% [" + 
+        IntegerToString(bullLowerTFBearCurrentTFCount) + " occurr.]", index++);
+        
+    CreateOrUpdateLabel("TF_Correlation_" + IntegerToString(index), 
+        middleTFName + " Bear -> " + currentTFName + " Bull: " + 
+        DoubleToString(bearLowerTFBullCurrentTFPercent, 2) + "% [" + 
+        IntegerToString(bearLowerTFBullCurrentTFCount) + " occurr.]", index++);
+        
+    CreateOrUpdateLabel("TF_Correlation_" + IntegerToString(index), 
+        middleTFName + " Bear -> " + currentTFName + " Bear: " + 
+        DoubleToString(bearLowerTFBearCurrentTFPercent, 2) + "% [" + 
+        IntegerToString(bearLowerTFBearCurrentTFCount) + " occurr.]", index++);
+    
+    // Double candle correlation header
+    CreateOrUpdateLabel("TF_Correlation_" + IntegerToString(index), 
+        middleTFName + "-" + currentTFName + " Double Candle Corr. (Previous Candle)", index++, false, true);
+    //NOTA: se la candela in esame è 14:15 - 14:30 allora su questo check la prima candela M5 è 14:15 - 14:20 
+    //ma la seconda candela di controllo è dalle 14:10 - 14:15 ovvero una candela PRIMA dell'avvio della candela M15 !!!
+    
+    // Double candle stats - Bull outcomes with occurrence counts
+    for(int i = 0; i < 4; i++)
+    {
+        if(doubleCandlePatterns[i].count > 0)
+        {
+            CreateOrUpdateLabel("TF_Correlation_" + IntegerToString(index), 
+                middleTFName + "(" + GetDoubleCandlePattern(i) + ") -> " + 
+                currentTFName + " Bull: " + 
+                DoubleToString(doubleCandlePatterns[i].bullishPercent, 2) + "% [" + 
+                IntegerToString(doubleCandlePatterns[i].bullishCount) + " occurr.]", index++);
+        }
+    }
+    
+    // Double candle stats - Bear outcomes with occurrence counts
+    for(int i = 0; i < 4; i++)
+    {
+        if(doubleCandlePatterns[i].count > 0)
+        {
+            CreateOrUpdateLabel("TF_Correlation_" + IntegerToString(index), 
+                middleTFName + "(" + GetDoubleCandlePattern(i) + ") -> " + 
+                currentTFName + " Bear: " + 
+                DoubleToString(doubleCandlePatterns[i].bearishPercent, 2) + "% [" + 
+                IntegerToString(doubleCandlePatterns[i].bearishCount) + " occurr.]", index++);
+        }
+    }
+    
+    int lowestTF = GetLowerTimeframe(middleTF);
+    if(lowestTF != 0)
+    {
+        UpdateTwoTimeframesDisplay(currentTF, middleTF, lowestTF, index);
+    }
+}
+
+//+------------------------------------------------------------------+
+void UpdateTwoTimeframesDisplay(int currentTF, int middleTF, int lowestTF, int startIndex)
+{
+    string currentTFName = GetTimeframeName(currentTF);
+    string middleTFName = GetTimeframeName(middleTF);
+    string lowestTFName = GetTimeframeName(lowestTF);
+    
+    int index = 1;  // Start from top for second column
+    
+    // Two timeframe correlation header
+    CreateOrUpdateLabel("TF_Correlation_2nd_" + IntegerToString(index), 
+        lowestTFName + "-" + middleTFName + "-" + currentTFName + " Correlation", 
+        index++, true, true);
+    
+    // Two timeframe stats with occurrence counts
+    for(int i = 0; i < 4; i++)
+    {
+        if(patterns[i].count > 0)
+        {
+            bool isLowestTFBull = ((i & 2) != 0);
+            bool isMiddleTFBull = ((i & 1) != 0);
+            
+            CreateOrUpdateLabel("TF_Correlation_2nd_" + IntegerToString(index), 
+                lowestTFName + " " + (isLowestTFBull ? "Bull" : "Bear") + " + " +
+                middleTFName + " " + (isMiddleTFBull ? "Bull" : "Bear") + " -> " +
+                currentTFName + " Bull: " + 
+                DoubleToString(patterns[i].bullishPercent, 2) + "% [" + 
+                IntegerToString(patterns[i].bullishCount) + " occurr.]", 
+                index++, true);
+        }
+    }
+    
+    for(int i = 0; i < 4; i++)
+    {
+        if(patterns[i].count > 0)
+        {
+            bool isLowestTFBull = ((i & 2) != 0);
+            bool isMiddleTFBull = ((i & 1) != 0);
+            
+            CreateOrUpdateLabel("TF_Correlation_2nd_" + IntegerToString(index), 
+                lowestTFName + " " + (isLowestTFBull ? "Bull" : "Bear") + " + " +
+                middleTFName + " " + (isMiddleTFBull ? "Bull" : "Bear") + " -> " +
+                currentTFName + " Bear: " + 
+                DoubleToString(patterns[i].bearishPercent, 2) + "% [" + 
+                IntegerToString(patterns[i].bearishCount) + " occurr.]", 
+                index++, true);
+        }
+    }
+    
+    index++;
+    UpdateExtendedDisplay(currentTF, middleTF, lowestTF, index);
+}
+
+//+------------------------------------------------------------------+
+void UpdateExtendedDisplay(int currentTF, int middleTF, int lowestTF, int startIndex)
+{
+    string currentTFName = GetTimeframeName(currentTF);
+    string middleTFName = GetTimeframeName(middleTF);
+    string lowestTFName = GetTimeframeName(lowestTF);
+    
+    int index = startIndex;
+    
+    // Header
+    CreateOrUpdateLabel("Extended_" + IntegerToString(index), 
+        lowestTFName + "-" + middleTFName + "-" + currentTFName + " Extended Correlation (Previous Candle)", 
+        index++, true, true);
+    // NOTA: anche qui viene usata la precedente candela, esempio: Current M15 candle: 14:15-14:30, First M5: 14:15-14:20, Second M5: 14:10-14:15
+    // First M1:  14:15-14:16, Second M1: 14:14-14:15
+   
+    // Display bullish outcomes with occurrence counts
+    for(int i = 0; i < 16; i++)
+    {
+        if(extendedPatterns[i].count > 0)
+        {
+            string pattern = GetPatternDescription(i, lowestTFName, middleTFName);
+            CreateOrUpdateLabel("Extended_" + IntegerToString(index), 
+                pattern + " -> " + currentTFName + " Bull: " + 
+                DoubleToString(extendedPatterns[i].bullishPercent, 2) + "% [" + 
+                IntegerToString(extendedPatterns[i].bullishCount) + " occurr.]", 
+                index++, true);
+        }
+    }
+    
+    // Display bearish outcomes with occurrence counts
+    for(int i = 0; i < 16; i++)
+    {
+        if(extendedPatterns[i].count > 0)
+        {
+            string pattern = GetPatternDescription(i, lowestTFName, middleTFName);
+            CreateOrUpdateLabel("Extended_" + IntegerToString(index), 
+                pattern + " -> " + currentTFName + " Bear: " + 
+                DoubleToString(extendedPatterns[i].bearishPercent, 2) + "% [" + 
+                IntegerToString(extendedPatterns[i].bearishCount) + " occurr.]", 
+                index++, true);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+void CreateOrUpdateLabel(string name, string text, int index, bool isSecondColumn = false, bool isHeader = false)
+{
+    if(ObjectFind(0, name) == -1)
+    {
+        ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+        
+        // Set corner and coordinates
+        ObjectSetInteger(0, name, OBJPROP_CORNER, TextCorner);
+        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, isSecondColumn ? SecondColumnX : TextX);
+        ObjectSetInteger(0, name, OBJPROP_YDISTANCE, GetYOffset(index));
+        
+        // Set text properties
+        ObjectSetInteger(0, name, OBJPROP_COLOR, TextColor);
+        ObjectSetInteger(0, name, OBJPROP_FONTSIZE, TextSize);
+        ObjectSetString(0, name, OBJPROP_FONT, isHeader ? "Arial Black" : "Arial");
+        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+    }
+    
+    ObjectSetString(0, name, OBJPROP_TEXT, text);
+    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, GetYOffset(index));
+    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, isSecondColumn ? SecondColumnX : TextX);
+}
