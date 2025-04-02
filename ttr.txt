@@ -1,0 +1,138 @@
+using System;
+using System.Collections.Generic;
+using System.Text;
+using cAlgo.API;
+using cAlgo.API.Indicators;
+using cAlgo.API.Internals;
+
+namespace cAlgo.Indicators
+{
+    [Indicator(IsOverlay = true, TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    public class M1M5PatternIndicator : Indicator
+    {
+        [Parameter("Number of M5 candles to analyze", DefaultValue = 500)]
+        public int SampleSize { get; set; }
+
+        private DateTime lastUpdateTime = DateTime.MinValue;
+        private int m1BullM1BullM5Bull = 0;
+        private int m1BullM1BullM5Bear = 0;
+        private int m1BearM1BearM5Bull = 0;
+        private int m1BearM1BearM5Bear = 0;
+        private int analyzedCandles = 0;
+        private Dictionary<DateTime, bool> analyzedM5Candles = new Dictionary<DateTime, bool>();
+
+        protected override void Initialize()
+        {
+            m1BullM1BullM5Bull = 0;
+            m1BullM1BullM5Bear = 0;
+            m1BearM1BearM5Bull = 0;
+            m1BearM1BearM5Bear = 0;
+            analyzedCandles = 0;
+            analyzedM5Candles.Clear();
+        }
+
+        public override void Calculate(int index)
+        {
+            // Only process on the last available index
+            if (index != MarketSeries.Close.Count - 1)
+                return;
+
+            DateTime currentTime = MarketSeries.OpenTime[index];
+            
+            // Avoid multiple updates in the same minute
+            if (currentTime.Minute == lastUpdateTime.Minute && currentTime.Hour == lastUpdateTime.Hour)
+                return;
+                
+            lastUpdateTime = currentTime;
+
+            // Get M1 and M5 series
+            var m1Series = MarketData.GetSeries(TimeFrame.Minute);
+            var m5Series = MarketData.GetSeries(TimeFrame.Minute5);
+
+            // Reset counters if we're starting fresh
+            if (analyzedCandles == 0)
+            {
+                m1BullM1BullM5Bull = 0;
+                m1BullM1BullM5Bear = 0;
+                m1BearM1BearM5Bull = 0;
+                m1BearM1BearM5Bear = 0;
+                analyzedM5Candles.Clear();
+            }
+
+            // Analyze completed M5 candles
+            for (int m5Index = m5Series.Close.Count - 2; m5Index >= 0 && analyzedCandles < SampleSize; m5Index--)
+            {
+                DateTime m5StartTime = m5Series.OpenTime[m5Index];
+                
+                // Skip if we've already analyzed this M5 candle
+                if (analyzedM5Candles.ContainsKey(m5StartTime))
+                    continue;
+
+                // Find the corresponding M1 candles for this M5 candle
+                List<int> m1Indices = new List<int>();
+                
+                // Look for the first two M1 candles of this M5 period
+                for (int i = m1Series.Close.Count - 1; i >= 1; i--)
+                {
+                    DateTime m1Time = m1Series.OpenTime[i];
+                    if (m1Time.Hour == m5StartTime.Hour && 
+                        m1Time.Minute >= m5StartTime.Minute && 
+                        m1Time.Minute < m5StartTime.Minute + 5)
+                    {
+                        m1Indices.Insert(0, i);
+                        if (m1Indices.Count == 2)
+                            break;
+                    }
+                }
+
+                // Process if we found both M1 candles
+                if (m1Indices.Count == 2)
+                {
+                    bool firstM1Bullish = m1Series.Close[m1Indices[0]] > m1Series.Open[m1Indices[0]];
+                    bool secondM1Bullish = m1Series.Close[m1Indices[1]] > m1Series.Open[m1Indices[1]];
+                    bool m5Bullish = m5Series.Close[m5Index] > m5Series.Open[m5Index];
+
+                    // Update pattern counters
+                    if (firstM1Bullish && secondM1Bullish)
+                    {
+                        if (m5Bullish)
+                            m1BullM1BullM5Bull++;
+                        else
+                            m1BullM1BullM5Bear++;
+                    }
+                    else if (!firstM1Bullish && !secondM1Bullish)
+                    {
+                        if (m5Bullish)
+                            m1BearM1BearM5Bull++;
+                        else
+                            m1BearM1BearM5Bear++;
+                    }
+
+                    analyzedM5Candles[m5StartTime] = true;
+                    analyzedCandles++;
+
+                    // Debug information
+                    Print($"Analyzed M5 candle at {m5StartTime}: First M1 = {(firstM1Bullish ? "Bull" : "Bear")}, Second M1 = {(secondM1Bullish ? "Bull" : "Bear")}, M5 = {(m5Bullish ? "Bull" : "Bear")}");
+                }
+            }
+
+            // Display results
+            var sb = new StringBuilder();
+            sb.AppendLine($"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}");
+            sb.AppendLine();
+            sb.AppendLine($"M1 Bull, M1 Bull > M5 Bull: {m1BullM1BullM5Bull}");
+            sb.AppendLine($"M1 Bull, M1 Bull > M5 Bear: {m1BullM1BullM5Bear}");
+            sb.AppendLine($"M1 Bear, M1 Bear > M5 Bull: {m1BearM1BearM5Bull}");
+            sb.AppendLine($"M1 Bear, M1 Bear > M5 Bear: {m1BearM1BearM5Bear}");
+            sb.AppendLine($"Analyzed: {analyzedCandles}/{SampleSize}");
+
+            Chart.DrawStaticText(
+                "PatternDisplay", 
+                sb.ToString(), 
+                VerticalAlignment.Top, 
+                HorizontalAlignment.Left, 
+                Color.Black
+            );
+        }
+    }
+}
