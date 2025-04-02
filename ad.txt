@@ -1,0 +1,101 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using cAlgo.API;
+using cAlgo.API.Indicators;
+using cAlgo.API.Internals;
+
+namespace cAlgo.Indicators
+{
+    [Indicator(IsOverlay = true, TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    public class M1M5PatternIndicator : Indicator
+    {
+        private DateTime lastUpdateTime = DateTime.MinValue;
+        private int bullishM1PatternBullishM5Count = 0;
+        private int bullishM1PatternBearishM5Count = 0;
+        private int bearishM1PatternBullishM5Count = 0;
+        private int bearishM1PatternBearishM5Count = 0;
+
+        protected override void Initialize()
+        {
+            // Reset counts
+            bullishM1PatternBullishM5Count = 0;
+            bullishM1PatternBearishM5Count = 0;
+            bearishM1PatternBullishM5Count = 0;
+            bearishM1PatternBearishM5Count = 0;
+        }
+
+        public override void Calculate(int index)
+        {
+            // Solo se siamo alla fine del grafico
+            if (index != MarketSeries.Close.Count - 1)
+                return;
+
+            DateTime currentTime = MarketSeries.OpenTime[index];
+            
+            // Aggiorna solo una volta al minuto
+            if (currentTime.Minute == lastUpdateTime.Minute && currentTime.Hour == lastUpdateTime.Hour)
+                return;
+                
+            lastUpdateTime = currentTime;
+            
+            // Se siamo all'inizio di un nuovo M5 (minuti divisibili per 5)
+            if (currentTime.Minute % 5 == 0)
+            {
+                // Ottieni le barre M1
+                var m1Series = MarketData.GetSeries(TimeFrame.Minute);
+                
+                // Assicurati di avere almeno 2 candele M1
+                if (m1Series.Close.Count < 2)
+                    return;
+                
+                int m1Index = m1Series.Close.Count - 1;
+                
+                // Ottieni le prime due candele M1 di questo periodo M5
+                bool firstCandleBullish = m1Series.Close[m1Index] > m1Series.Open[m1Index];
+                bool secondCandleBullish = m1Series.Close[m1Index - 1] > m1Series.Open[m1Index - 1];
+                
+                // Ottieni se il pattern è bullish (entrambe le candele M1 bullish) o bearish (entrambe le candele M1 bearish)
+                bool patternBullish = firstCandleBullish && secondCandleBullish;
+                bool patternBearish = !firstCandleBullish && !secondCandleBullish;
+                
+                // Ottieni la candela M5 corrente
+                var m5Series = MarketData.GetSeries(TimeFrame.Minute5);
+                int m5Index = m5Series.Close.Count - 1;
+                
+                // Se la candela M5 precedente è completa (verifichiamo basandoci sul tempo)
+                if (m5Index > 0 && (DateTime.Now - m5Series.OpenTime[m5Index - 1]).TotalMinutes >= 5)
+                {
+                    bool m5Bullish = m5Series.Close[m5Index - 1] > m5Series.Open[m5Index - 1];
+                    
+                    // Aggiorna i contatori
+                    if (patternBullish)
+                    {
+                        if (m5Bullish)
+                            bullishM1PatternBullishM5Count++;
+                        else
+                            bullishM1PatternBearishM5Count++;
+                    }
+                    else if (patternBearish)
+                    {
+                        if (m5Bullish)
+                            bearishM1PatternBullishM5Count++;
+                        else
+                            bearishM1PatternBearishM5Count++;
+                    }
+                }
+            }
+            
+            // Crea le stringhe di informazioni
+            string bullishPatternInfo = string.Format("Pattern M1 Bullish: {0} M5 Bullish, {1} M5 Bearish", 
+                bullishM1PatternBullishM5Count, bullishM1PatternBearishM5Count);
+                
+            string bearishPatternInfo = string.Format("Pattern M1 Bearish: {0} M5 Bullish, {1} M5 Bearish", 
+                bearishM1PatternBullishM5Count, bearishM1PatternBearishM5Count);
+            
+            // Mostra le informazioni sul grafico con tutti i parametri richiesti
+            Chart.DrawStaticText("BullishPatternInfo", bullishPatternInfo, StaticPosition.TopLeft, Colors.Green, 12, "Arial", FontStyle.Bold);
+            Chart.DrawStaticText("BearishPatternInfo", bearishPatternInfo, StaticPosition.TopRight, Colors.Red, 12, "Arial", FontStyle.Bold);
+        }
+    }
+}
