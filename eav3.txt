@@ -1,0 +1,632 @@
+//+------------------------------------------------------------------+
+//| Combined EA: HLCO_60 + me_SimpleTradingDashboard                |
+//| Maintains original functionality of both EAs with minimal edits |
+//+------------------------------------------------------------------+
+
+// V3 contiene un rifacimento esteso su Claude per le funzioni chiusura/apertura posizioni
+// volto a migliorare la velocità a discapito di qualche effettuo visuale
+
+#property copyright "Your Name"
+#property link      "https://yourwebsite.com"
+#property version   "1.00"
+#property indicator_chart_window
+
+// Input parameters for HLCO_60 (EA1)
+input int TimeFrameSeconds = 60; // Time frame in seconds (default: 60 seconds)
+input int LabelOffsetBars = 5;   // Offset for label position (bars to the right)
+
+// Input parameters for me_SimpleTradingDashboard (EA2)
+int extern SubWindow = 0;
+input ENUM_BASE_CORNER Corner = 3;
+extern double Lots = 0.01; // Lot
+input int Move_X = 85;
+input int Move_Y = 40;
+input int slip  = 5; // Slippage
+input string B00001 = "====================";
+int Button_Width = 100;
+input string Font_Type = "Arial Black";
+input int Font_Size = 8; 
+input color Font_Color = clrDarkGray;
+input color Lot_Font_Color = clrBlack;
+input color CL = clrDimGray; // Lots + - buttons
+input color CB = clrDarkGreen; // Buy button color
+input color CS = clrCrimson; // Sell button color
+input color CA = clrBlue; // Close All button color
+input color CAB = clrWhite; // Close Buy button color
+input color CAS = clrWhite; // Close Sell button color
+input color CBR = clrBlack; // Border button color - clrNONE per nessun colore
+input color CBS = clrDarkGreen;
+input color CLS = clrRed;
+
+// Arrays and variables for HLCO_60 (EA1)
+double TickPrices[]; // Array to store tick prices
+datetime TickTimes[]; // Array to store tick timestamps
+double LastHigh = 0;
+double LastLow = 0;
+double LastOpen = 0;
+double LastClose = 0;
+
+// Object names for HLCO_60 (EA1)
+string HighLineName = "HLCO_HighLine";
+string LowLineName = "HLCO_LowLine";
+string OpenLineName = "HLCO_OpenLine";
+string CloseLineName = "HLCO_CloseLine";
+string HighLabelName = "HLCO_HighLabel";
+string LowLabelName = "HLCO_LowLabel";
+string OpenLabelName = "HLCO_OpenLabel";
+string CloseLabelName = "HLCO_CloseLabel";
+
+// Variables for me_SimpleTradingDashboard (EA2)
+int ticket, itotal, pp;
+double Pekali;
+int sl=0,tp=0;
+
+//+------------------------------------------------------------------+
+//| Initialization function                                          |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // Initialize HLCO_60 (EA1)
+    ArrayResize(TickPrices, 0);
+    ArrayResize(TickTimes, 0);
+    UpdateLinesAndLabels();
+
+    // Initialize me_SimpleTradingDashboard (EA2)
+    double Lot = DoubleToStr(Lots, 2);
+    if (ObjectFind("Lot_Plus_btn") == -1)
+    {
+        CreateButtons();
+    }
+    else
+    {
+        UpdateButtonPositions();
+    }
+    if (ObjectFind("Lot_Edit") == -1)
+    {
+        ObjectCreate("Lot_Edit", OBJ_EDIT, SubWindow, 0, 0);
+        ObjectSet("Lot_Edit", OBJPROP_CORNER, Corner);
+        ObjectSet("Lot_Edit", OBJPROP_XSIZE, Button_Width - 060);
+        ObjectSet("Lot_Edit", OBJPROP_YSIZE, Font_Size*3);
+        ObjectSet("Lot_Edit", OBJPROP_XDISTANCE, 036 + Move_X);
+        ObjectSet("Lot_Edit", OBJPROP_YDISTANCE, 036 + Move_Y);
+    }
+    ObjectSetText("Lot_Edit", Lot, 13, Font_Type, Lot_Font_Color);
+
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Deinitialization function                                        |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Remove HLCO_60 objects (EA1)
+    ObjectDelete(0, HighLineName);
+    ObjectDelete(0, LowLineName);
+    ObjectDelete(0, OpenLineName);
+    ObjectDelete(0, CloseLineName);
+    ObjectDelete(0, HighLabelName);
+    ObjectDelete(0, LowLabelName);
+    ObjectDelete(0, OpenLabelName);
+    ObjectDelete(0, CloseLabelName);
+
+    // Remove me_SimpleTradingDashboard objects (EA2)
+    DeleteButtons();
+    ObjectDelete("Lot_Edit");
+    ObjectDelete("Lot_Close");
+}
+
+//+------------------------------------------------------------------+
+//| Main tick function                                               |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    // HLCO_60 logic (EA1)
+    datetime currentTime = TimeCurrent();
+    double currentPrice = Bid;
+    AddTick(currentPrice, currentTime);
+    RemoveOldTicks(currentTime);
+    double high = CalculateHigh();
+    double low = CalculateLow();
+    double open = CalculateOpen();
+    double close = CalculateClose();
+    LastHigh = high;
+    LastLow = low;
+    LastOpen = open;
+    LastClose = close;
+    UpdateLinesAndLabels();
+}
+
+//+------------------------------------------------------------------+
+//| Chart event handler                                              |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+    // me_SimpleTradingDashboard logic (EA2)
+    if (id == CHARTEVENT_CHART_CHANGE)
+    {
+        UpdateButtonPositions();
+    }
+    else if (id == CHARTEVENT_OBJECT_CLICK)
+    {
+        if (ObjectType(sparam) == OBJ_BUTTON)
+        {
+            ButtonPressed(0, sparam);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Functions for HLCO_60 (EA1)                                      |
+//+------------------------------------------------------------------+
+void AddTick(double price, datetime time)
+{
+    int size = ArraySize(TickPrices);
+    ArrayResize(TickPrices, size + 1);
+    ArrayResize(TickTimes, size + 1);
+    TickPrices[size] = price;
+    TickTimes[size] = time;
+}
+
+void RemoveOldTicks(datetime currentTime)
+{
+    int newSize = 0;
+    for (int i = 0; i < ArraySize(TickPrices); i++)
+    {
+        if (currentTime - TickTimes[i] <= TimeFrameSeconds)
+        {
+            TickPrices[newSize] = TickPrices[i];
+            TickTimes[newSize] = TickTimes[i];
+            newSize++;
+        }
+    }
+    ArrayResize(TickPrices, newSize);
+    ArrayResize(TickTimes, newSize);
+}
+
+double CalculateHigh()
+{
+    double high = EMPTY_VALUE;
+    for (int i = 0; i < ArraySize(TickPrices); i++)
+    {
+        if (TickPrices[i] > high || high == EMPTY_VALUE)
+        {
+            high = TickPrices[i];
+        }
+    }
+    return high;
+}
+
+double CalculateLow()
+{
+    double low = EMPTY_VALUE;
+    for (int i = 0; i < ArraySize(TickPrices); i++)
+    {
+        if (TickPrices[i] < low || low == EMPTY_VALUE)
+        {
+            low = TickPrices[i];
+        }
+    }
+    return low;
+}
+
+double CalculateOpen()
+{
+    if (ArraySize(TickPrices) > 0)
+    {
+        return TickPrices[0]; // The oldest tick in the array
+    }
+    return EMPTY_VALUE;
+}
+
+double CalculateClose()
+{
+    if (ArraySize(TickPrices) > 0)
+    {
+        return TickPrices[ArraySize(TickPrices) - 1]; // The most recent tick in the array
+    }
+    return EMPTY_VALUE;
+}
+
+void UpdateLinesAndLabels()
+{
+    DrawHorizontalLine(HighLineName, LastHigh, clrFireBrick);
+    DrawLabel(HighLabelName, "High", LastHigh, clrFireBrick);
+    DrawHorizontalLine(LowLineName, LastLow, clrBlue);
+    DrawLabel(LowLabelName, "Low", LastLow, clrBlue);
+    DrawHorizontalLine(OpenLineName, LastOpen, clrGreen);
+    DrawLabel(OpenLabelName, "Open", LastOpen, clrGreen);
+    DrawHorizontalLine(CloseLineName, LastClose, clrDarkOrange);
+    DrawLabel(CloseLabelName, "Close", LastClose, clrDarkOrange);
+}
+
+void DrawHorizontalLine(string name, double value, color lineColor)
+{
+    if (ObjectFind(0, name) < 0)
+    {
+        ObjectCreate(0, name, OBJ_HLINE, 0, 0, value);
+    }
+    ObjectSetInteger(0, name, OBJPROP_COLOR, lineColor);
+    ObjectSetDouble(0, name, OBJPROP_PRICE, value);
+    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+}
+
+void DrawLabel(string name, string text, double price, color textColor)
+{
+    if (ObjectFind(0, name) < 0)
+    {
+        ObjectCreate(0, name, OBJ_TEXT, 0, Time[0], price);
+    }
+    datetime labelTime = Time[0] + LabelOffsetBars * PeriodSeconds();
+    ObjectSetString(0, name, OBJPROP_TEXT, text);
+    ObjectSetInteger(0, name, OBJPROP_COLOR, textColor);
+    ObjectSetDouble(0, name, OBJPROP_PRICE, price);
+    ObjectSetInteger(0, name, OBJPROP_TIME, labelTime);
+    ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
+}
+
+//+------------------------------------------------------------------+
+//| Functions for me_SimpleTradingDashboard (EA2)                    |
+//+------------------------------------------------------------------+
+void CreateButtons()
+{
+    int Button_Height = Font_Size*2.3;
+    ButtonCreate(0, "Lot_Plus_btn", 0, 010 - 028 + Move_X, 005 + 039 + Move_Y, Button_Width - 050, Button_Height + 020, Corner, "+", Font_Type, Font_Size+3 , Font_Color, CL, CBR);
+    ButtonCreate(0, "Lot_Minus_btn", 0, 010 + 090 + Move_X, 005 + 039  + Move_Y, Button_Width - 050, Button_Height + 020, Corner, "-", Font_Type, Font_Size+3 , Font_Color, CL, CBR);
+    ButtonCreate(0, "Buy_00000_btn", 0, 000 - 018 + Move_X, 000 + 78 + Move_Y, Button_Width - 050, Button_Height + 010, Corner, "BUY", Font_Type, Font_Size, Font_Color, CB, CBR);
+    ButtonCreate(0, "Sell_0000_btn", 0, 010 + 090 + Move_X, 000 + 78 + Move_Y, Button_Width - 050, Button_Height + 010, Corner, "SELL", Font_Type, Font_Size, Font_Color, CS, CBR);    
+    ButtonCreate(0, "Close_All_btn", 0, 000 + 43 + Move_X, 000 + 78 + Move_Y, Button_Width - 046, Button_Height + 010, Corner, "CLOSE", Font_Type, Font_Size, Font_Color, CA, CBR);     
+    ButtonCreate(0, "Close_Buy_btn", 0, 000 + 013 + Move_X, 000 + 0 + Move_Y, Button_Width - 020, Button_Height + 010, Corner, "Close Buy", Font_Type, Font_Size, Font_Color, CAB, CBR);
+    ButtonCreate(0, "Close_Sel_btn", 0, 010 + 90 + Move_X, 000 + 0 + Move_Y, Button_Width - 020, Button_Height + 010, Corner, "Close Sell", Font_Type, Font_Size, Font_Color, CAS, CBR);
+    ChartRedraw();
+}
+
+void DeleteButtons()
+{
+    ButtonDelete(0, "Buy_00000_btn");
+    ButtonDelete(0, "Sell_0000_btn");
+    ButtonDelete(0, "Close_All_btn");
+    ButtonDelete(0, "Lot_Plus_btn");
+    ButtonDelete(0, "Lot_Minus_btn"); 
+    ButtonDelete(0, "Close_Buy_btn");
+    ButtonDelete(0, "Close_Sel_btn");
+}
+
+// OPTIMIZED BUTTON HANDLER - Removed Sleep delay for maximum speed
+void ButtonPressed(const long chartID, const string sparam)
+{
+    // Set button border color for visual indication
+    ObjectSetInteger(chartID, sparam, OBJPROP_BORDER_COLOR, CBR);
+    
+    // Process button actions immediately without delay
+    if (sparam == "Buy_00000_btn") Buy_00000_Button(sparam);
+    if (sparam == "Sell_0000_btn") Sell_0000_Button(sparam);
+    if (sparam == "Close_All_btn") Close_All_Button(sparam);
+    if (sparam == "Lot_Plus_btn") Lot_Plus_Button(sparam);
+    if (sparam == "Lot_Minus_btn") Lot_Minus_Button(sparam);
+    if (sparam == "Close_Buy_btn") Close_Buy_Button(sparam);
+    if (sparam == "Close_Sel_btn") Close_Sell_Button(sparam);
+    
+    // Reset button state immediately
+    ObjectSetInteger(chartID, sparam, OBJPROP_STATE, false);
+    ChartRedraw();
+}
+
+bool ButtonCreate(const long chart_ID=0, const string name="Button", const int sub_window=0, const int x=0, const int y=0, const int width=500,
+                  const int height=18, int corner=0, const string text="Button", const string font="Arial Bold",
+                  const int font_size=14, const color clr=clrBlack, const color back_clr=clrBlack, const color border_clr=clrNONE,
+                  const bool state=false, const bool back=false, const bool selection=false, const bool hidden=true, const long z_order=0)
+{
+    ResetLastError();
+    if (!ObjectCreate(chart_ID,name, OBJ_BUTTON, SubWindow, 0, 0))
+    {
+        Print(__FUNCTION__, ": failed to create the button! Error code = ", GetLastError());
+        return(false);
+    }
+    ObjectSetInteger(chart_ID, name, OBJPROP_XDISTANCE, x);
+    ObjectSetInteger(chart_ID, name, OBJPROP_YDISTANCE, y);
+    ObjectSetInteger(chart_ID, name, OBJPROP_XSIZE, width);
+    ObjectSetInteger(chart_ID, name, OBJPROP_YSIZE, height);
+    ObjectSetInteger(chart_ID, name, OBJPROP_CORNER, corner);
+    ObjectSetInteger(chart_ID, name, OBJPROP_FONTSIZE, font_size);
+    ObjectSetInteger(chart_ID, name, OBJPROP_COLOR, clr);
+    ObjectSetInteger(chart_ID, name, OBJPROP_BGCOLOR, back_clr);
+    ObjectSetInteger(chart_ID, name, OBJPROP_BORDER_COLOR, border_clr);
+    ObjectSetInteger(chart_ID, name, OBJPROP_BACK, back);
+    ObjectSetInteger(chart_ID, name, OBJPROP_STATE, state);
+    ObjectSetInteger(chart_ID, name, OBJPROP_SELECTABLE, selection);
+    ObjectSetInteger(chart_ID, name, OBJPROP_SELECTED, selection);
+    ObjectSetInteger(chart_ID, name, OBJPROP_HIDDEN, hidden);
+    ObjectSetInteger(chart_ID, name, OBJPROP_ZORDER,z_order);
+    ObjectSetString(chart_ID, name, OBJPROP_TEXT, text);
+    ObjectSetString(chart_ID, name, OBJPROP_FONT, font);
+    return(true);
+}
+
+bool ButtonDelete(const long chart_ID=0, const string name="Button")
+{
+    ResetLastError();
+    if (!ObjectDelete(chart_ID,name))
+    {
+        Print(__FUNCTION__, ": Failed to delete the button! Error code = ", GetLastError());
+        return(false);
+    }
+    return(true);
+}
+
+void UpdateButtonPositions()
+{
+    int Button_Height = Font_Size*2.3;
+    ObjectSet("Lot_Plus_btn", OBJPROP_XDISTANCE, 010 - 028 + Move_X);
+    ObjectSet("Lot_Plus_btn", OBJPROP_YDISTANCE, 005 + 039 + Move_Y);
+    ObjectSet("Lot_Minus_btn", OBJPROP_XDISTANCE, 010 + 090 + Move_X);
+    ObjectSet("Lot_Minus_btn", OBJPROP_YDISTANCE, 005 + 039 + Move_Y);
+    ObjectSet("Buy_00000_btn", OBJPROP_XDISTANCE, 000 - 018 + Move_X);
+    ObjectSet("Buy_00000_btn", OBJPROP_YDISTANCE, 000 + 78 + Move_Y);
+    ObjectSet("Sell_0000_btn", OBJPROP_XDISTANCE, 010 + 090 + Move_X);
+    ObjectSet("Sell_0000_btn", OBJPROP_YDISTANCE, 000 + 78 + Move_Y);
+    ObjectSet("Close_All_btn", OBJPROP_XDISTANCE, 000 + 43 + Move_X);
+    ObjectSet("Close_All_btn", OBJPROP_YDISTANCE, 000 + 78 + Move_Y);
+    ChartRedraw();
+}
+
+int Lot_Plus_Button(const string sparam)
+{
+    double Lot_Extract = NormalizeDouble(StrToDouble(ObjectGetString(0, "Lot_Edit", OBJPROP_TEXT, 0)),2);
+    ObjectSetText("Lot_Edit", DoubleToStr(Lot_Extract+0.01,2) , 13, Font_Type, Font_Color);
+    return(0);
+}
+
+int Lot_Minus_Button(const string sparam)
+{
+    double Lot_Extract = NormalizeDouble(StrToDouble(ObjectGetString(0, "Lot_Edit", OBJPROP_TEXT, 0)),2);
+    if (Lot_Extract>=0.02) ObjectSetText("Lot_Edit", DoubleToStr(Lot_Extract-0.01,2) , 13, Font_Type, Font_Color);
+    return(0);
+}
+
+// OPTIMIZED Close_Buy_Button FUNCTION - Faster execution
+int Close_Buy_Button(const string sparam)
+{
+    if (OrdersTotal() == 0) return(0);
+    
+    int closed = 0;
+    
+    for (int i = OrdersTotal() - 1; i >= 0; i--)
+    {
+        // Single OrderSelect with all conditions in one check for efficiency
+        if (!OrderSelect(i, SELECT_BY_POS, MODE_TRADES) || OrderSymbol() != Symbol() || OrderType() != OP_BUY)
+            continue;
+        
+        // Store order info to avoid multiple OrderSelect calls
+        int orderTicket = OrderTicket();
+        double orderLots = OrderLots();
+        bool success = false;
+        
+        // Try with increasing slippage - minimize delay between retries
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            int slippage = slip * attempt;
+            
+            // Reselect only once per attempt to get fresh price
+            if (OrderSelect(orderTicket, SELECT_BY_TICKET))
+            {
+                if (OrderClose(orderTicket, orderLots, Bid, slippage, CLR_NONE))
+                {
+                    closed++;
+                    success = true;
+                    break;
+                }
+                else
+                {
+                    int error = GetLastError();
+                    // Minimal wait on requote, increasing with each attempt
+                    if (error == 138)
+                        Sleep(20 * attempt);
+                    else
+                        Print("Error closing buy: ", error);
+                }
+            }
+        }
+        
+        if (!success) Print("Failed to close buy position after 3 attempts");
+    }
+    
+    if (closed > 0) Print("Closed ", closed, " buy positions");
+    return(0);
+}
+
+// OPTIMIZED Close_Sell_Button FUNCTION - Faster execution
+int Close_Sell_Button(const string sparam)
+{
+    if (OrdersTotal() == 0) return(0);
+    
+    int closed = 0;
+    
+    for (int i = OrdersTotal() - 1; i >= 0; i--)
+    {
+        // Single OrderSelect with all conditions in one check for efficiency
+        if (!OrderSelect(i, SELECT_BY_POS, MODE_TRADES) || OrderSymbol() != Symbol() || OrderType() != OP_SELL)
+            continue;
+        
+        // Store order info to avoid multiple OrderSelect calls
+        int orderTicket = OrderTicket();
+        double orderLots = OrderLots();
+        bool success = false;
+        
+        // Try with increasing slippage - minimize delay between retries
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            int slippage = slip * attempt;
+            
+            // Reselect only once per attempt to get fresh price
+            if (OrderSelect(orderTicket, SELECT_BY_TICKET))
+            {
+                if (OrderClose(orderTicket, orderLots, Ask, slippage, CLR_NONE))
+                {
+                    closed++;
+                    success = true;
+                    break;
+                }
+                else
+                {
+                    int error = GetLastError();
+                    // Minimal wait on requote, increasing with each attempt
+                    if (error == 138)
+                        Sleep(20 * attempt);
+                    else
+                        Print("Error closing sell: ", error);
+                }
+            }
+        }
+        
+        if (!success) Print("Failed to close sell position after 3 attempts");
+    }
+    
+    if (closed > 0) Print("Closed ", closed, " sell positions");
+    return(0);
+}
+
+// OPTIMIZED Close_All_Button FUNCTION - Faster execution with OrderCloseBy for matching positions
+int Close_All_Button(const string sparam)
+{
+    if (OrdersTotal() == 0) return(0);
+    
+    // Stats tracking
+    int closedPairs = 0;
+    int closedBuys = 0;
+    int closedSells = 0;
+    
+    // First try to use OrderCloseBy for matching positions (to avoid commissions)
+    for (int b = OrdersTotal() - 1; b >= 0; b--)
+    {
+        if (!OrderSelect(b, SELECT_BY_POS, MODE_TRADES) || OrderSymbol() != Symbol() || OrderType() != OP_BUY)
+            continue;
+            
+        double buyLot = OrderLots();
+        int buyTicket = OrderTicket();
+        
+        // Look for matching sell order
+        for (int s = OrdersTotal() - 1; s >= 0; s--)
+        {
+            if (!OrderSelect(s, SELECT_BY_POS, MODE_TRADES) || OrderSymbol() != Symbol() || OrderType() != OP_SELL)
+                continue;
+                
+            if (NormalizeDouble(OrderLots(), 2) == NormalizeDouble(buyLot, 2))
+            {
+                // Found a matching sell order, try to close the pair
+                int sellTicket = OrderTicket();
+                
+                // Reselect the buy ticket as current order
+                if (OrderSelect(buyTicket, SELECT_BY_TICKET))
+                {
+                    if (OrderCloseBy(buyTicket, sellTicket, CLR_NONE))
+                    {
+                        closedPairs++;
+                        // Since OrdersTotal() will now be different, we need to adjust
+                        b = OrdersTotal(); // This will become OrdersTotal()-1 after the b-- in the loop
+                        if (b < 0) break;  // No more orders
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Close remaining buys (that couldn't be paired)
+    for (int i = OrdersTotal() - 1; i >= 0; i--)
+    {
+        if (!OrderSelect(i, SELECT_BY_POS, MODE_TRADES) || OrderSymbol() != Symbol() || OrderType() != OP_BUY)
+            continue;
+            
+        int orderTicket = OrderTicket();
+        double orderLots = OrderLots();
+        bool success = false;
+        
+        // Try with increasing slippage
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            int slippage = slip * attempt;
+            
+            if (OrderSelect(orderTicket, SELECT_BY_TICKET))
+            {
+                if (OrderClose(orderTicket, orderLots, Bid, slippage, CLR_NONE))
+                {
+                    closedBuys++;
+                    success = true;
+                    break;
+                }
+                else
+                {
+                    int error = GetLastError();
+                    if (error == 138) // Requote - use minimal wait time
+                        Sleep(20 * attempt);
+                    else
+                        Print("Buy close error: ", error);
+                }
+            }
+        }
+        
+        if (!success) Print("Failed to close buy position after 3 attempts");
+    }
+    
+    // Close remaining sells (that couldn't be paired)
+    for (int j = OrdersTotal() - 1; j >= 0; j--)
+    {
+        if (!OrderSelect(j, SELECT_BY_POS, MODE_TRADES) || OrderSymbol() != Symbol() || OrderType() != OP_SELL)
+            continue;
+            
+        int orderTicket2 = OrderTicket();
+        double orderLots2 = OrderLots();
+        bool success2 = false;
+        
+        // Try with increasing slippage
+        for (int attempt2 = 1; attempt2 <= 3; attempt2++)
+        {
+            int slippage2 = slip * attempt2;
+            
+            if (OrderSelect(orderTicket2, SELECT_BY_TICKET))
+            {
+                if (OrderClose(orderTicket2, orderLots2, Ask, slippage2, CLR_NONE))
+                {
+                    closedSells++;
+                    success2 = true;
+                    break;
+                }
+                else
+                {
+                    int error2 = GetLastError();
+                    if (error2 == 138) // Requote - use minimal wait time
+                        Sleep(20 * attempt2);
+                    else
+                        Print("Sell close error: ", error2);
+                }
+            }
+        }
+        
+        if (!success2) Print("Failed to close sell position after 3 attempts");
+    }
+    
+    // Report results
+    if (closedPairs > 0 || closedBuys > 0 || closedSells > 0)
+        Print("Closed: ", closedPairs, " pairs, ", closedBuys, " buys, ", closedSells, " sells");
+    
+    return(0);
+}
+
+// OPTIMIZED Buy/Sell functions for faster execution
+int Buy_00000_Button(const string sparam)
+{
+    double Lot_Extract = StrToDouble(ObjectGetString(0, "Lot_Edit", OBJPROP_TEXT, 0));
+    ticket = OrderSend(Symbol(), OP_BUY, Lot_Extract, Ask, slip, 0, 0, "BUY", 12345601, 0, CLR_NONE);
+    if(ticket < 0) Print("Buy error: ", GetLastError());
+    return(0);
+}
+
+int Sell_0000_Button(const string sparam)
+{
+    double Lot_Extract = StrToDouble(ObjectGetString(0, "Lot_Edit", OBJPROP_TEXT, 0));
+    ticket = OrderSend(Symbol(), OP_SELL, Lot_Extract, Bid, slip, 0, 0, "SELL", 12345602, 0, CLR_NONE);
+    if(ticket < 0) Print("Sell error: ", GetLastError());
+    return(0);
+}
