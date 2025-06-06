@@ -1,0 +1,733 @@
+# analizza quanti pips si muove il prezzo dopo high e low fatti nei primi X minuti
+# si può analizzare una candela Y qualsiasi
+# per esempio se M15 è la candela da analizzare, posso specificare X=5
+# dopo 5 minuti dall'inizio della candela si hanno high e low raggiunti
+# a quel punto si valuta quanti pips il prezzo si è mosso oltre high e low
+# si ottengono quindi della fasce di pips e probabilità
+# inoltre è possibile effettuare dei backtest indicando delle fasce di TP/SL
+# e indicando da che candela aprire posizione (e di conseguenza da quale momento
+# considerare high e low)
+
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import tkinter as tk
+from tkinter import filedialog
+import itertools
+from dataclasses import dataclass
+from typing import List, Dict, Tuple
+from tabulate import tabulate
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import psutil
+
+@dataclass
+class Position:
+    entry_price: float
+    entry_time: datetime
+    type: str  # 'buy' or 'sell'
+    take_profit: float
+    stop_loss: float
+    pip_size: float
+    
+    def check_exit(self, high: float, low: float) -> Tuple[bool, float, str]:
+        """
+        Verifica se la posizione deve essere chiusa.
+        Returns: (closed, exit_price, reason)
+        """
+        if self.type == 'buy':
+            if high >= self.take_profit:
+                return True, self.take_profit, 'tp'
+            if low <= self.stop_loss:
+                return True, self.stop_loss, 'sl'
+        else:  # sell
+            if low <= self.take_profit:
+                return True, self.take_profit, 'tp'
+            if high >= self.stop_loss:
+                return True, self.stop_loss, 'sl'
+        return False, 0.0, ''
+
+class CandlestickBreakoutAnalyzer:
+    def __init__(self, csv_file=None):
+        """
+        Inizializza l'analizzatore
+        
+        Args:
+            csv_file: percorso del file CSV (None per aprire finestra di selezione)
+        """
+        self.df = self.load_data(csv_file)
+        self.results = []
+        self.pip_size = None  # Verrà impostato dopo la conferma dell'utente
+    
+    def select_csv_file(self):
+        """Apre una finestra per selezionare il file CSV"""
+        root = tk.Tk()
+        root.withdraw()  # Nasconde la finestra principale
+        
+        file_path = filedialog.askopenfilename(
+            title="Seleziona il file CSV con i dati",
+            filetypes=[("File CSV", "*.csv"), ("Tutti i file", "*.*")]
+        )
+        
+        root.destroy()
+        return file_path
+        
+    def load_data(self, csv_file):
+        """Carica i dati dal CSV"""
+        if csv_file is None or csv_file == "":
+            csv_file = self.select_csv_file()
+            if not csv_file:
+                raise ValueError("Nessun file selezionato")
+        
+        columns = ['date', 'time', 'open', 'high', 'low', 'close', 'volume']
+        df = pd.read_csv(csv_file, names=columns)
+        
+        # Combina data e ora
+        df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'])
+        df = df.set_index('datetime')
+        df = df.sort_index()
+        
+        print(f"File caricato: {csv_file}")
+        print(f"Candele M1 caricate: {len(df)}")
+        
+        return df[['open', 'high', 'low', 'close', 'volume']]
+    
+    def suggest_pip_size(self):
+        """Suggerisce il pip size basandosi sui dati e chiede conferma all'utente"""
+        # Prende un campione di prezzi per determinare le cifre decimali
+        sample_prices = self.df['close'].head(100)
+        
+        # Trova il numero di cifre decimali più comune
+        decimal_places = []
+        for price in sample_prices:
+            price_str = str(price)
+            if '.' in price_str:
+                decimal_places.append(len(price_str.split('.')[1]))
+        
+        if decimal_places:
+            most_common_decimals = max(set(decimal_places), key=decimal_places.count)
+            suggested_pip_size = 10 ** -(most_common_decimals - 1)  # Un pip è la penultima cifra decimale
+        else:
+            suggested_pip_size = 1  # Per strumenti senza decimali
+        
+        # Analisi dei prezzi per suggerimenti più intelligenti
+        min_price = self.df[['open', 'high', 'low', 'close']].min().min()
+        max_price = self.df[['open', 'high', 'low', 'close']].max().max()
+        
+        print(f"\n=== ANALISI PIP SIZE ===")
+        print(f"Range prezzi: {min_price:.5f} - {max_price:.5f}")
+        print(f"Cifre decimali più comuni: {most_common_decimals}")
+        print(f"Pip size suggerito: {suggested_pip_size}")
+        
+        # Fornisce alcuni esempi per aiutare l'utente
+        print(f"\nEsempi pip size comuni:")
+        print(f"  - Forex major pairs (EUR/USD, GBP/USD): 0.0001")
+        print(f"  - Forex JPY pairs (USD/JPY, EUR/JPY): 0.01")
+        print(f"  - Indici con decimali (DAX, S&P): 0.1 o 1")
+        print(f"  - Crypto (BTC/USD): 1 o 10")
+        print(f"  - XAU/USD: 0.1")
+        
+        while True:
+            confirm = input(f"\nUsare il pip size suggerito {suggested_pip_size}? (s/n): ").lower()
+            if confirm == 's':
+                self.pip_size = suggested_pip_size
+                break
+            elif confirm == 'n':
+                while True:
+                    try:
+                        custom_pip_size = float(input("Inserisci il pip size personalizzato: "))
+                        if custom_pip_size > 0:
+                            self.pip_size = custom_pip_size
+                            break
+                        else:
+                            print("Inserisci un numero positivo.")
+                    except ValueError:
+                        print("Inserisci un numero valido.")
+                break
+            else:
+                print("Inserisci 's' per sì o 'n' per no.")
+        
+        print(f"Pip size impostato: {self.pip_size}")
+
+    def get_candle_groups(self, timeframe_minutes):
+        """
+        Raggruppa le candele M1 in candele del timeframe specificato
+        
+        Args:
+            timeframe_minutes: timeframe in minuti (es. 15 per M15)
+        """
+        groups = []
+        current_group = []
+        
+        for timestamp, row in self.df.iterrows():
+            if len(current_group) == 0:
+                current_group = [(timestamp, row)]
+            elif len(current_group) < timeframe_minutes:
+                current_group.append((timestamp, row))
+            else:
+                groups.append(current_group)
+                current_group = [(timestamp, row)]
+        
+        # Aggiungi l'ultimo gruppo se completo
+        if len(current_group) == timeframe_minutes:
+            groups.append(current_group)
+            
+        return groups
+    
+    def analyze_breakout(self, timeframe_minutes, analysis_minutes):
+        """
+        Analizza i breakout per il timeframe specificato
+        
+        Args:
+            timeframe_minutes: timeframe della candela principale (es. 15)
+            analysis_minutes: minuti da analizzare per trovare high/low (es. 5)
+        """
+        if analysis_minutes >= timeframe_minutes:
+            raise ValueError("analysis_minutes deve essere minore di timeframe_minutes")
+            
+        candle_groups = self.get_candle_groups(timeframe_minutes)
+        self.results = []
+        
+        print(f"Analizzando {len(candle_groups)} candele M{timeframe_minutes}")
+        
+        for group_idx, group in enumerate(candle_groups):
+            result = self.analyze_single_candle(group, analysis_minutes, timeframe_minutes)
+            if result:
+                self.results.append(result)
+        
+        return self.results
+    
+    def analyze_single_candle(self, group, analysis_minutes, timeframe_minutes):
+        """Analizza una singola candela del timeframe superiore"""
+        if len(group) < timeframe_minutes:
+            return None
+            
+        # Prendi i primi analysis_minutes per trovare high/low
+        analysis_period = group[:analysis_minutes]
+        remaining_period = group[analysis_minutes:]
+        
+        # Trova high e low nei primi analysis_minutes
+        analysis_high = max([candle[1]['high'] for candle in analysis_period])
+        analysis_low = min([candle[1]['low'] for candle in analysis_period])
+        
+        # Analizza il resto della candela per breakout
+        high_breakout_pips = 0
+        low_breakout_pips = 0
+        high_broken = False
+        low_broken = False
+        max_high_extension = 0
+        max_low_extension = 0
+        
+        for timestamp, candle in remaining_period:
+            # Controlla breakout dell'high
+            if not high_broken and candle['high'] > analysis_high:
+                high_broken = True
+                
+            if high_broken:
+                current_extension = (candle['high'] - analysis_high) / self.pip_size
+                max_high_extension = max(max_high_extension, current_extension)
+            
+            # Controlla breakout del low
+            if not low_broken and candle['low'] < analysis_low:
+                low_broken = True
+                
+            if low_broken:
+                current_extension = (analysis_low - candle['low']) / self.pip_size
+                max_low_extension = max(max_low_extension, current_extension)
+        
+        result = {
+            'start_time': group[0][0],
+            'analysis_high': analysis_high,
+            'analysis_low': analysis_low,
+            'high_broken': high_broken,
+            'low_broken': low_broken,
+            'high_extension_pips': max_high_extension if high_broken else 0,
+            'low_extension_pips': max_low_extension if low_broken else 0,
+            'timeframe': timeframe_minutes,
+            'analysis_period': analysis_minutes
+        }
+        
+        return result
+    
+    def calculate_statistics(self):
+        """Calcola le statistiche dei breakout"""
+        if not self.results:
+            print("Nessun risultato disponibile. Esegui prima analyze_breakout()")
+            return
+            
+        total_candles = len(self.results)
+        high_breakouts = [r for r in self.results if r['high_broken']]
+        low_breakouts = [r for r in self.results if r['low_broken']]
+        
+        # Calcola breakout combinati
+        both_breakouts = [r for r in self.results if r['high_broken'] and r['low_broken']]
+        only_high_breakouts = [r for r in self.results if r['high_broken'] and not r['low_broken']]
+        only_low_breakouts = [r for r in self.results if r['low_broken'] and not r['high_broken']]
+        no_breakouts = [r for r in self.results if not r['high_broken'] and not r['low_broken']]
+        
+        print(f"\n=== STATISTICHE BREAKOUT ===")
+        print(f"Candele totali analizzate: {total_candles}")
+        print(f"\n--- DISTRIBUZIONE BREAKOUT ---")
+        print(f"Solo HIGH: {len(only_high_breakouts)} ({len(only_high_breakouts)/total_candles*100:.1f}%)")
+        print(f"Solo LOW: {len(only_low_breakouts)} ({len(only_low_breakouts)/total_candles*100:.1f}%)")
+        print(f"Sia HIGH che LOW: {len(both_breakouts)} ({len(both_breakouts)/total_candles*100:.1f}%)")
+        print(f"Nessun breakout: {len(no_breakouts)} ({len(no_breakouts)/total_candles*100:.1f}%)")
+        print(f"\nTotale breakout HIGH: {len(high_breakouts)} ({len(high_breakouts)/total_candles*100:.1f}%)")
+        print(f"Totale breakout LOW: {len(low_breakouts)} ({len(low_breakouts)/total_candles*100:.1f}%)")
+        
+        # Statistiche HIGH breakout
+        if high_breakouts:
+            high_pips = [r['high_extension_pips'] for r in high_breakouts if r['high_extension_pips'] > 0]
+            if high_pips:
+                print(f"\n--- STATISTICHE HIGH BREAKOUT ---")
+                print(f"Estensione media: {np.mean(high_pips):.1f} pips")
+                print(f"Estensione mediana: {np.median(high_pips):.1f} pips")
+                print(f"Estensione massima: {max(high_pips):.1f} pips")
+                print(f"Estensione minima: {min(high_pips):.1f} pips")
+                
+                # Fasce percentuali
+                self.print_pip_ranges("HIGH", high_pips)
+        
+        # Statistiche LOW breakout
+        if low_breakouts:
+            low_pips = [r['low_extension_pips'] for r in low_breakouts if r['low_extension_pips'] > 0]
+            if low_pips:
+                print(f"\n--- STATISTICHE LOW BREAKOUT ---")
+                print(f"Estensione media: {np.mean(low_pips):.1f} pips")
+                print(f"Estensione mediana: {np.median(low_pips):.1f} pips")
+                print(f"Estensione massima: {max(low_pips):.1f} pips")
+                print(f"Estensione minima: {min(low_pips):.1f} pips")
+                
+                # Fasce percentuali
+                self.print_pip_ranges("LOW", low_pips)
+    
+    def print_pip_ranges(self, breakout_type, pips_data):
+        """Stampa le fasce di pips con percentuali"""
+        # Fasce adattive basate sui dati
+        max_pips = max(pips_data) if pips_data else 0
+        
+        if max_pips <= 10:
+            ranges = [
+                (0, 1, "0-1 pips"),
+                (1, 2, "1-2 pips"),
+                (2, 5, "2-5 pips"),
+                (5, 10, "5-10 pips"),
+                (10, float('inf'), "10+ pips")
+            ]
+        elif max_pips <= 50:
+            ranges = [
+                (0, 5, "0-5 pips"),
+                (5, 10, "5-10 pips"),
+                (10, 20, "10-20 pips"),
+                (20, 30, "20-30 pips"),
+                (30, 50, "30-50 pips"),
+                (50, float('inf'), "50+ pips")
+            ]
+        else:
+            ranges = [
+                (0, 10, "0-10 pips"),
+                (10, 25, "10-25 pips"),
+                (25, 50, "25-50 pips"),
+                (50, 100, "50-100 pips"),
+                (100, 200, "100-200 pips"),
+                (200, float('inf'), "200+ pips")
+            ]
+        
+        print(f"\nDistribuzione fasce {breakout_type}:")
+        total = len(pips_data)
+        
+        for min_pips, max_pips, label in ranges:
+            count = len([p for p in pips_data if min_pips <= p < max_pips])
+            percentage = count / total * 100 if total > 0 else 0
+            print(f"  {label}: {count} occorrenze ({percentage:.1f}%)")
+
+    def plot_results(self):
+        """Crea grafici dei risultati"""
+        if not self.results:
+            print("Nessun risultato disponibile per il grafico")
+            return
+            
+        high_pips = [r['high_extension_pips'] for r in self.results if r['high_broken'] and r['high_extension_pips'] > 0]
+        low_pips = [r['low_extension_pips'] for r in self.results if r['low_broken'] and r['low_extension_pips'] > 0]
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # Grafico HIGH breakout
+        if high_pips:
+            ax1.hist(high_pips, bins=20, alpha=0.7, color='green', edgecolor='black')
+            ax1.set_title('Distribuzione Estensioni HIGH Breakout')
+            ax1.set_xlabel('Pips')
+            ax1.set_ylabel('Frequenza')
+            ax1.grid(True, alpha=0.3)
+        
+        # Grafico LOW breakout
+        if low_pips:
+            ax2.hist(low_pips, bins=20, alpha=0.7, color='red', edgecolor='black')
+            ax2.set_title('Distribuzione Estensioni LOW Breakout')
+            ax2.set_xlabel('Pips')
+            ax2.set_ylabel('Frequenza')
+            ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+
+class StrategyOptimizer(CandlestickBreakoutAnalyzer):
+    def __init__(self, csv_file=None):
+        super().__init__(csv_file)
+        self.optimization_results = []
+        
+    def get_optimization_params(self):
+        """Chiede all'utente i parametri per l'ottimizzazione"""
+        print("\n=== CONFIGURAZIONE OTTIMIZZAZIONE ===")
+        
+        def get_range_input(name, min_limit, max_limit):
+            while True:
+                try:
+                    start = int(input(f"Inserisci valore iniziale per {name} (min {min_limit}): "))
+                    end = int(input(f"Inserisci valore finale per {name} (max {max_limit}): "))
+                    step = int(input(f"Inserisci step per {name}: "))
+                    
+                    if start < min_limit or end > max_limit or start >= end or step <= 0:
+                        print(f"Valori non validi. Range permesso: {min_limit}-{max_limit}")
+                        continue
+                    
+                    return range(start, end + 1, step)
+                except ValueError:
+                    print("Inserisci numeri validi")
+
+        # Prima chiediamo il timeframe
+        while True:
+            try:
+                timeframe = int(input("\nInserisci il timeframe in minuti (es. 15 per M15, 30 per M30): "))
+                if timeframe > 0:
+                    break
+                else:
+                    print("Inserisci un numero positivo.")
+            except ValueError:
+                print("Inserisci un numero valido.")
+    
+        print("\nConfigurazione analisi candele:")
+        print(f"Nota: il numero di candele deve essere minore del timeframe ({timeframe})")
+        analysis_minutes_range = get_range_input("candele di analisi", 3, timeframe-1)
+        
+        print("\nConfigurazione Take Profit:")
+        tp_range = get_range_input("Take Profit (pips)", 3, 50)
+        
+        print("\nConfigurazione Stop Loss:")
+        sl_range = get_range_input("Stop Loss (pips)", 3, 50)
+        
+        # Mostra riepilogo
+        print("\n=== RIEPILOGO CONFIGURAZIONE ===")
+        print(f"Timeframe: M{timeframe}")
+        print(f"Candele analisi: da {min(analysis_minutes_range)} a {max(analysis_minutes_range)} step {analysis_minutes_range.step}")
+        print(f"Take Profit: da {min(tp_range)} a {max(tp_range)} step {tp_range.step}")
+        print(f"Stop Loss: da {min(sl_range)} a {max(sl_range)} step {sl_range.step}")
+        
+        return timeframe, analysis_minutes_range, tp_range, sl_range
+    
+    def optimize_strategy(self):
+        # Ottieni parametri dall'utente
+        timeframe, analysis_minutes_range, tp_range, sl_range = self.get_optimization_params()
+        
+        # Calcola tutte le combinazioni
+        all_combinations = list(itertools.product(analysis_minutes_range, tp_range, sl_range))
+        total_combinations = len(all_combinations)
+        
+        # Info sistema
+        cpu_count = mp.cpu_count()
+        print(f"\nCPU disponibili: {cpu_count}")
+        print(f"Memoria totale: {psutil.virtual_memory().total / (1024**3):.1f} GB")
+        
+        print(f"\nInizio ottimizzazione con {total_combinations} combinazioni...")
+        print("Utilizzo tutti i core disponibili per velocizzare il processo.")
+        
+        progress = 0
+        last_percentage = -1
+        start_time = datetime.now()
+        
+        # Multiprocessing
+        with ProcessPoolExecutor(max_workers=cpu_count) as executor:
+            # Submette tutti i task
+            future_to_params = {
+                executor.submit(self._worker_process, (timeframe, *params)): params 
+                for params in all_combinations
+            }
+            
+            # Processa i risultati man mano che vengono completati
+            for future in as_completed(future_to_params):
+                result = future.result()
+                self.optimization_results.append(result)
+                
+                progress += 1
+                current_percentage = (progress * 100) // total_combinations
+                
+                if current_percentage > last_percentage:
+                    elapsed_time = datetime.now() - start_time
+                    avg_time_per_combination = elapsed_time / progress
+                    remaining_combinations = total_combinations - progress
+                    estimated_remaining_time = avg_time_per_combination * remaining_combinations
+                    
+                    # Output stato corrente
+                    print(f"\rProgresso: {current_percentage}% ", end="")
+                    print(f"[{'=' * (current_percentage // 2)}>{' ' * (50 - (current_percentage // 2))}] ", end="")
+                    print(f"({progress}/{total_combinations})", end="")
+                    
+                    if progress > 10:
+                        print(f" - Rimangono: {str(estimated_remaining_time).split('.')[0]}", end="")
+                    
+                    # Calcola le performance correnti
+                    current_results = sorted(
+                        self.optimization_results,
+                        key=lambda x: x['avg_monthly_pips'],
+                        reverse=True
+                    )
+                    best_so_far = current_results[0] if current_results else None
+                    if best_so_far:
+                        print(f" | Miglior risultato: {best_so_far['avg_monthly_pips']:.1f} pips/mese", end="")
+                    
+                    print("", end="\r")
+                    last_percentage = current_percentage
+        
+        total_time = datetime.now() - start_time
+        print(f"\n\nOttimizzazione completata in {str(total_time).split('.')[0]}")
+        print(f"Combinazioni testate: {total_combinations}")
+        print(f"Tempo medio per combinazione: {str(total_time/total_combinations).split('.')[0]}")
+        
+        self.show_best_results()
+    
+    def _worker_process(self, params):
+        """Funzione eseguita da ogni worker"""
+        timeframe, analysis_minutes, tp_pips, sl_pips = params
+        return self.backtest_strategy(timeframe, analysis_minutes, tp_pips, sl_pips)
+
+    def backtest_strategy(self, timeframe: int, analysis_minutes: int, tp_pips: int, sl_pips: int) -> dict:
+        positions: List[Position] = []
+        trades_history = []
+        daily_stats = defaultdict(lambda: {'trades': 0, 'pips': 0.0})
+        
+        # Raggruppa le candele per timeframe
+        candle_groups = self.get_candle_groups(timeframe)
+        
+        for group in candle_groups:
+            if len(group) < timeframe:
+                continue
+            
+            # Analizza i primi analysis_minutes per trovare high/low
+            analysis_period = group[:analysis_minutes]
+            remaining_period = group[analysis_minutes:]
+            
+            # Trova high e low nei primi analysis_minutes
+            analysis_high = max([candle[1]['high'] for candle in analysis_period])
+            analysis_low = min([candle[1]['low'] for candle in analysis_period])
+            
+            # Analizza il resto della candela per breakout e gestione posizioni
+            for timestamp, candle in remaining_period:
+                # Gestisci posizioni esistenti
+                for pos in positions[:]:
+                    closed, exit_price, reason = pos.check_exit(candle['high'], candle['low'])
+                    if closed:
+                        pips = (exit_price - pos.entry_price) / self.pip_size
+                        if pos.type == 'sell':
+                            pips = -pips
+                        
+                        trade_date = timestamp.date()
+                        daily_stats[trade_date]['trades'] += 1
+                        daily_stats[trade_date]['pips'] += pips
+                        
+                        trades_history.append({
+                            'type': pos.type,
+                            'entry_time': pos.entry_time,
+                            'exit_time': timestamp,
+                            'entry_price': pos.entry_price,
+                            'exit_price': exit_price,
+                            'pips': pips,
+                            'reason': reason
+                        })
+                        
+                        positions.remove(pos)
+                
+                # Verifica nuove entry
+                # Buy se rompe l'high
+                if candle['high'] > analysis_high:
+                    tp = candle['high'] + (tp_pips * self.pip_size)
+                    sl = candle['high'] - (sl_pips * self.pip_size)
+                    positions.append(Position(
+                        entry_price=candle['high'],
+                        entry_time=timestamp,
+                        type='buy',
+                        take_profit=tp,
+                        stop_loss=sl,
+                        pip_size=self.pip_size
+                    ))
+                
+                # Sell se rompe il low
+                if candle['low'] < analysis_low:
+                    tp = candle['low'] - (tp_pips * self.pip_size)
+                    sl = candle['low'] + (sl_pips * self.pip_size)
+                    positions.append(Position(
+                        entry_price=candle['low'],
+                        entry_time=timestamp,
+                        type='sell',
+                        take_profit=tp,
+                        stop_loss=sl,
+                        pip_size=self.pip_size
+                    ))
+        
+        # Calcola statistiche
+        if not trades_history:
+            return self._create_empty_result(analysis_minutes, tp_pips, sl_pips)
+        
+        total_trades = len(trades_history)
+        winning_trades = len([t for t in trades_history if t['reason'] == 'tp'])
+        total_pips = sum(t['pips'] for t in trades_history)
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        
+        # Statistiche giornaliere e mensili
+        daily_trades = np.mean([stats['trades'] for stats in daily_stats.values()])
+        daily_pips = np.mean([stats['pips'] for stats in daily_stats.values()])
+        monthly_pips = daily_pips * 22  # Assumendo 22 giorni di trading al mese
+        
+        return {
+            'analysis_minutes': analysis_minutes,
+            'tp_pips': tp_pips,
+            'sl_pips': sl_pips,
+            'total_trades': total_trades,
+            'win_rate': win_rate,
+            'total_pips': total_pips,
+            'avg_daily_trades': daily_trades,
+            'avg_daily_pips': daily_pips,
+            'avg_monthly_pips': monthly_pips,
+            'profit_factor': self._calculate_profit_factor(trades_history)
+        }
+    
+    def _create_empty_result(self, analysis_minutes, tp_pips, sl_pips):
+        return {
+            'analysis_minutes': analysis_minutes,
+            'tp_pips': tp_pips,
+            'sl_pips': sl_pips,
+            'total_trades': 0,
+            'win_rate': 0,
+            'total_pips': 0,
+            'avg_daily_trades': 0,
+            'avg_daily_pips': 0,
+            'avg_monthly_pips': 0,
+            'profit_factor': 0
+        }
+    
+    def _calculate_profit_factor(self, trades_history):
+        winning_pips = sum(t['pips'] for t in trades_history if t['pips'] > 0)
+        losing_pips = abs(sum(t['pips'] for t in trades_history if t['pips'] < 0))
+        return winning_pips / losing_pips if losing_pips != 0 else float('inf')
+    
+    def show_best_results(self, top_n=10):
+        if not self.optimization_results:
+            print("Nessun risultato di ottimizzazione disponibile")
+            return
+            
+        # Ordina per pips mensili
+        sorted_results = sorted(
+            self.optimization_results,
+            key=lambda x: x['avg_monthly_pips'],
+            reverse=True
+        )
+        
+        # Prendi i migliori N risultati
+        top_results = sorted_results[:top_n]
+        
+        # Prepara i dati per la tabella
+        headers = [
+            'Candele', 'TP', 'SL', 'Win%', 'Profit',
+            'Trade/g', 'Pips/g', 'Pips/m', 'P.Factor'
+        ]
+        
+        rows = []
+        for r in top_results:
+            rows.append([
+                r['analysis_minutes'],
+                r['tp_pips'],
+                r['sl_pips'],
+                f"{r['win_rate']:.1f}%",
+                f"{r['total_pips']:.1f}p",
+                f"{r['avg_daily_trades']:.1f}",
+                f"{r['avg_daily_pips']:.1f}",
+                f"{r['avg_monthly_pips']:.1f}",
+                f"{r['profit_factor']:.2f}"
+            ])
+        
+        print("\n=== MIGLIORI RISULTATI ===")
+        print(tabulate(rows, headers=headers, tablefmt='grid'))
+        
+        # Grafico dei risultati
+        self.plot_optimization_results(sorted_results)
+    
+    def plot_optimization_results(self, sorted_results):
+        """Crea un grafico scatter 3D dei risultati dell'ottimizzazione"""
+        # Estrai i dati
+        analysis = [r['analysis_minutes'] for r in sorted_results]
+        tp = [r['tp_pips'] for r in sorted_results]
+        sl = [r['sl_pips'] for r in sorted_results]
+        performance = [r['avg_monthly_pips'] for r in sorted_results]
+        
+        # Crea il grafico 3D
+        fig = plt.figure(figsize=(12, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Scatter plot colorato in base alla performance
+        scatter = ax.scatter(analysis, tp, sl, c=performance, cmap='viridis')
+        
+        # Aggiungi la colorbar
+        plt.colorbar(scatter, label='Pips mensili medi')
+        
+        # Labels
+        ax.set_xlabel('Candele Analisi')
+        ax.set_ylabel('Take Profit (pips)')
+        ax.set_zlabel('Stop Loss (pips)')
+        ax.set_title('Risultati Ottimizzazione')
+        
+        plt.show()
+
+def main():
+    print("=== BREAKOUT ANALYZER E OTTIMIZZATORE ===")
+    print("1. Analisi Breakout")
+    print("2. Ottimizzazione Strategia")
+    
+    while True:
+        try:
+            choice = int(input("\nScegli modalità (1-2): "))
+            if choice in [1, 2]:
+                break
+            else:
+                print("Inserisci 1 o 2")
+        except ValueError:
+            print("Inserisci un numero valido")
+    
+    if choice == 1:
+        analyzer = CandlestickBreakoutAnalyzer()
+        analyzer.suggest_pip_size()
+        
+        # Input timeframe e periodo analisi
+        while True:
+            try:
+                timeframe = int(input("\nInserisci timeframe in minuti (es. 15 per M15): "))
+                analysis = int(input(f"Inserisci minuti di analisi (1-{timeframe-1}): "))
+                if 0 < analysis < timeframe:
+                    break
+                else:
+                    print(f"Il periodo di analisi deve essere tra 1 e {timeframe-1}")
+            except ValueError:
+                print("Inserisci numeri validi")
+        
+        # Esegui analisi
+        analyzer.analyze_breakout(timeframe, analysis)
+        analyzer.calculate_statistics()
+        analyzer.plot_results()
+        
+    else:  # choice == 2
+        optimizer = StrategyOptimizer()
+        optimizer.suggest_pip_size()
+        optimizer.optimize_strategy()
+
+if __name__ == "__main__":
+    main()
