@@ -1,0 +1,261 @@
+import pandas as pd
+import numpy as np
+from datetime import timedelta
+import tkinter as tk
+from tkinter import filedialog
+
+# ============================
+# PARAMETRI (modificabili)
+# ============================
+PIP_VALUE = 0.01           # 1 pip = 0.01$ su XAU/USD
+TP_PIPS = 50               # TP (sia per modalità 1 che per modalità 2: gruppo)
+SL_PIPS = 50               # SL (solo modalità 1)
+AVERAGING_DISTANCE = 70    # distanza minima (pips) per aprire nuova posizione (modalità 2)
+MAX_CANDLES = 30           # durata massima (in candele) per ogni trade
+TRADING_START = 7          # ora di inizio (inclusa)
+TRADING_END = 19           # ora di fine (esclusa)
+EMERGENCY_SL_PIPS = 150    # SL di emergenza per modalità 2 (perdita totale)
+
+# ============================
+# UTIL / I/O
+# ============================
+def load_csv():
+    root = tk.Tk()
+    root.withdraw()
+    path = filedialog.askopenfilename(title="Seleziona file CSV", filetypes=[("CSV","*.csv")])
+    df = pd.read_csv(path, header=None)
+    df.columns = ["Date","Time","Open","High","Low","Close","Volume"]
+    df["Datetime"] = pd.to_datetime(df["Date"] + " " + df["Time"], format="%Y.%m.%d %H:%M")
+    df.set_index("Datetime", inplace=True)
+    # controllo gap dati
+    diffs = df.index.to_series().diff().dropna()
+    max_gap = diffs.max()
+    if max_gap > pd.Timedelta(minutes=1):
+        print(f"ATTENZIONE: gap massimo tra righe = {max_gap}. Controlla la continuità M1 dei dati.")
+    return df
+
+# ============================
+# Modalità 1: TP/SL singolo
+# ============================
+def mode1_backtest(df, tp_pips=TP_PIPS, sl_pips=SL_PIPS, max_candles=MAX_CANDLES, pip_value=PIP_VALUE):
+    tp_px = tp_pips * pip_value
+    sl_px = sl_pips * pip_value
+    rows = []
+    for idx, row in df.iterrows():
+        if idx.minute % 15 != 0:
+            continue
+        if not (TRADING_START <= idx.hour < TRADING_END):
+            continue
+        entry = row.Close
+        direction = "BUY" if row.Close > row.Open else ("SELL" if row.Close < row.Open else None)
+        if direction is None:
+            continue
+        tp_level = entry + tp_px if direction == "BUY" else entry - tp_px
+        sl_level = entry - sl_px if direction == "BUY" else entry + sl_px
+        # Ottieni slice dei dati futuri
+        try:
+            start_idx = df.index.get_loc(idx) + 1
+            end_idx = min(start_idx + max_candles, len(df))
+            sub = df.iloc[start_idx:end_idx]
+        except:
+            continue
+        outcome = "TIME"
+        bars = len(sub) if len(sub) < max_candles else max_candles
+        exit_price = entry
+        mae = 0; mfe = 0
+        for i, fut in enumerate(sub.itertuples(), 1):
+            high, low, close = fut.High, fut.Low, fut.Close
+            # Calcola MAE/MFE
+            if direction == "BUY":
+                mae = max(mae, entry - low)
+                mfe = max(mfe, high - entry)
+                # Prima controlla SL, poi TP (priorità SL)
+                if low <= sl_level:
+                    outcome = "SL"; bars = i; exit_price = sl_level; break
+                if high >= tp_level:
+                    outcome = "TP"; bars = i; exit_price = tp_level; break
+            else:
+                mae = max(mae, high - entry)
+                mfe = max(mfe, entry - low)
+                # Prima controlla SL, poi TP
+                if high >= sl_level:
+                    outcome = "SL"; bars = i; exit_price = sl_level; break
+                if low <= tp_level:
+                    outcome = "TP"; bars = i; exit_price = tp_level; break
+        if outcome == "TIME" and len(sub) > 0:
+            exit_price = sub.iloc[-1].Close
+        pnl_pips = ((exit_price - entry)/pip_value) if direction=="BUY" else ((entry - exit_price)/pip_value)
+        rows.append({
+            "Datetime": idx, "Mode":"TP/SL", "Direction":direction, "Outcome":outcome,
+            "Bars":bars, "PnL_pips":pnl_pips, "Positions":1,
+            "MAE_pips": mae / pip_value, "MFE_pips": mfe / pip_value
+        })
+    return pd.DataFrame(rows)
+
+# ============================
+# Modalità 2: Averaging con TP di gruppo e SL di emergenza
+# ============================
+# ============================
+# Modalità 2: Averaging con TP di gruppo e SL di emergenza
+# ============================
+def mode2_averaging(df, tp_pips=TP_PIPS, avg_distance=AVERAGING_DISTANCE, max_candles=MAX_CANDLES, 
+                   pip_value=PIP_VALUE, emergency_sl_pips=EMERGENCY_SL_PIPS):
+    tp_px = tp_pips * pip_value
+    dist_px = avg_distance * pip_value
+    emergency_sl_px = emergency_sl_pips * pip_value
+    rows = []
+    for idx, row in df.iterrows():
+        if idx.minute % 15 != 0:
+            continue
+        if not (TRADING_START <= idx.hour < TRADING_END):
+            continue
+        entry = row.Close
+        direction = "BUY" if row.Close > row.Open else ("SELL" if row.Close < row.Open else None)
+        if direction is None:
+            continue
+        positions = [entry]
+        max_positions = 1
+        last_averaging_candle = -1  # track ultima candela dove ho fatto averaging
+        try:
+            start_idx = df.index.get_loc(idx) + 1
+            end_idx = min(start_idx + max_candles, len(df))
+            sub = df.iloc[start_idx:end_idx]
+        except:
+            continue
+        outcome = "TIME"
+        bars = len(sub) if len(sub) < max_candles else max_candles
+        exit_price = entry
+        pnl_total_pips = 0
+
+        for i, fut in enumerate(sub.itertuples(), 1):
+            o, h, l, c = fut.Open, fut.High, fut.Low, fut.Close
+
+            if direction == "BUY":
+                # --- STEP 1: Calcola TP per la configurazione ATTUALE (prima di qualsiasi azione) ---
+                npos = len(positions)
+                sum_entries = sum(positions)
+                required_tp_price = (sum_entries + tp_px * npos) / npos
+
+                # --- STEP 2: Controlla se il TP è stato raggiunto (con HIGH) ---
+                if h >= required_tp_price:
+                    pnl_total_pips = sum((required_tp_price - e)/pip_value for e in positions)
+                    outcome, bars, exit_price = "TP", i, required_tp_price
+                    break
+
+                # --- STEP 3: Valuta Averaging sull'OPEN ---
+                last_entry = positions[-1]
+                if (i != last_averaging_candle and 
+                    (last_entry - o) >= dist_px):  # averaging down
+                    positions.append(o)
+                    max_positions = max(max_positions, len(positions))
+                    last_averaging_candle = i
+
+                    # --- STEP 4: Dopo averaging, ricalcola TP e controlla immediatamente ---
+                    npos = len(positions)
+                    sum_entries = sum(positions)
+                    required_tp_price = (sum_entries + tp_px * npos) / npos
+                    if h >= required_tp_price:
+                        pnl_total_pips = sum((required_tp_price - e)/pip_value for e in positions)
+                        outcome, bars, exit_price = "TP", i, required_tp_price
+                        break
+
+                # --- STEP 5: Controlla SL di emergenza SOLO DOPO aver gestito TP e averaging ---
+                total_pnl = sum((l - e)/pip_value for e in positions)  # worst case: LOW
+                if total_pnl <= -emergency_sl_pips:
+                    pnl_total_pips = total_pnl
+                    outcome, bars, exit_price = "SL", i, l
+                    break
+
+            else:  # SELL
+                # --- STEP 1: Calcola TP per la configurazione ATTUALE ---
+                npos = len(positions)
+                sum_entries = sum(positions)
+                required_tp_price = (sum_entries - tp_px * npos) / npos
+
+                # --- STEP 2: Controlla se il TP è stato raggiunto (con LOW) ---
+                if l <= required_tp_price:
+                    pnl_total_pips = sum((e - required_tp_price)/pip_value for e in positions)
+                    outcome, bars, exit_price = "TP", i, required_tp_price
+                    break
+
+                # --- STEP 3: Valuta Averaging sull'OPEN ---
+                last_entry = positions[-1]
+                if (i != last_averaging_candle and 
+                    (o - last_entry) >= dist_px):  # averaging up
+                    positions.append(o)
+                    max_positions = max(max_positions, len(positions))
+                    last_averaging_candle = i
+
+                    # --- STEP 4: Dopo averaging, ricalcola TP e controlla immediatamente ---
+                    npos = len(positions)
+                    sum_entries = sum(positions)
+                    required_tp_price = (sum_entries - tp_px * npos) / npos
+                    if l <= required_tp_price:
+                        pnl_total_pips = sum((e - required_tp_price)/pip_value for e in positions)
+                        outcome, bars, exit_price = "TP", i, required_tp_price
+                        break
+
+                # --- STEP 5: Controlla SL di emergenza SOLO DOPO aver gestito TP e averaging ---
+                total_pnl = sum((e - h)/pip_value for e in positions)  # worst case: HIGH
+                if total_pnl <= -emergency_sl_pips:
+                    pnl_total_pips = total_pnl
+                    outcome, bars, exit_price = "SL", i, h
+                    break
+
+        # Chiusura per timeout
+        if outcome == "TIME" and len(sub) > 0:
+            final_close = sub.iloc[-1].Close
+            if direction == "BUY":
+                pnl_total_pips = sum((final_close - e)/pip_value for e in positions)
+            else:
+                pnl_total_pips = sum((e - final_close)/pip_value for e in positions)
+            exit_price = final_close
+
+        rows.append({
+            "Datetime": idx, "Mode":"Averaging", "Direction":direction, "Outcome":outcome,
+            "Bars":bars, "PnL_pips": pnl_total_pips, "Positions": len(positions),
+            "MaxPositions": max_positions, "ExitPrice": exit_price
+        })
+    return pd.DataFrame(rows)
+
+# ============================
+# ANALISI / STAMPE
+# ============================
+def analyze_and_print(trades):
+    if trades.shape[0] == 0:
+        print("Nessun trade generato")
+        return
+    total = len(trades)
+    print("\n=== Distribuzione outcomes ===")
+    print((trades["Outcome"].value_counts(normalize=True)*100).round(3))
+    print("\n=== Statistiche generali ===")
+    print(f"Total trades: {total}")
+    print(f"Win % (TP): {(trades['Outcome']=='TP').mean()*100:.2f}")
+    print(f"Loss % (SL): {(trades['Outcome']=='SL').mean()*100:.2f}")
+    print(f"Timeout %: {(trades['Outcome']=='TIME').mean()*100:.2f}")
+    print(f"Total PnL (pips): {trades['PnL_pips'].sum():.2f}")
+    print(f"Avg PnL per trade (pips): {trades['PnL_pips'].mean():.4f}")
+    print(f"Best trade (pips): {trades['PnL_pips'].max():.2f}")
+    print(f"Worst trade (pips): {trades['PnL_pips'].min():.2f}")
+    if "Positions" in trades.columns:
+        print(f"Avg positions per trade: {trades['Positions'].mean():.2f}")
+        if "MaxPositions" in trades.columns:
+            print(f"Max positions observed: {int(trades['MaxPositions'].max())}")
+    print("\n=== Distribuzione durata (bars) ===")
+    print(trades["Bars"].describe().round(2))
+    print("\n=== Prime 10 trades ===")
+    print(trades.head(10))
+
+# ============================
+# MAIN - CORRETTO
+# ============================
+if __name__ == "__main__":
+    df = load_csv()
+    mode = input("Scegli modalità (1 = TP/SL singolo, 2 = Averaging): ").strip()
+    if mode == "1":
+        trades = mode1_backtest(df)
+    elif mode == "2":
+        trades = mode2_averaging(df)
+    else:
+        raise SystemExit("Modalità non valida")
+    analyze_and_print(trades)
